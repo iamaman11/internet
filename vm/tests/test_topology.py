@@ -32,6 +32,13 @@ def assert_routing_isolation(config, name):
     if outbounds.get("warp-local", {}).get("server") != "warp-egress":
         raise ValueError("warp egress target is missing")
 
+def ensure_http_proxy_alpn(config):
+    for inbound in config["inbounds"]:
+        if inbound.get("tls", {}).get("enabled"):
+            if inbound["tls"].get("alpn") != ["http/1.1"]:
+                raise ValueError("HTTPS_PROXY_ALPN_UNSUPPORTED")
+
+
 def warp_udp_supported(config):
     socks = next(x for x in config["outbounds"] if x["tag"] == "warp-local")
     return socks.get("network") != "tcp"
@@ -53,6 +60,20 @@ class TopologyTests(unittest.TestCase):
                             and "password" in x["users"][0] for x in c["inbounds"]))
         self.assertTrue(all(x.get("tls", {}).get("enabled") for x in c["inbounds"]
                             if x["listen_port"] in (9443,4443)))
+
+    def test_https_proxy_tls_alpn_matches_sing_box_1_14(self):
+        c = load("line2.json")
+        ensure_http_proxy_alpn(c)
+        self.assertEqual([x["listen_port"] for x in c["inbounds"]
+                          if x.get("tls", {}).get("enabled")], [9443, 4443])
+
+    def test_negative_h2_alpn_rejected(self):
+        c = load("line2.json")
+        next(x for x in c["inbounds"] if x["listen_port"] == 9443)["tls"]["alpn"] = [
+            "h2", "http/1.1"
+        ]
+        with self.assertRaisesRegex(ValueError, "HTTPS_PROXY_ALPN_UNSUPPORTED"):
+            ensure_http_proxy_alpn(c)
 
     def test_one_native_acme_owner_shared_with_line2(self):
         one = load("line1.json")
