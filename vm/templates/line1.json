@@ -68,8 +68,7 @@
         "alpn": [
           "h3"
         ],
-        "certificate_path": "/etc/sing-box/tls/tunnel.crt",
-        "key_path": "/etc/sing-box/tls/tunnel.key"
+        "certificate_provider": "s1-tls"
       },
       "ignore_client_bandwidth": true,
       "masquerade": "https://www.bing.com"
@@ -117,8 +116,7 @@
         "alpn": [
           "h3"
         ],
-        "certificate_path": "/etc/sing-box/tls/tunnel.crt",
-        "key_path": "/etc/sing-box/tls/tunnel.key"
+        "certificate_provider": "s1-tls"
       },
       "ignore_client_bandwidth": true,
       "masquerade": "https://www.bing.com"
@@ -158,5 +156,16 @@
     ],
     "final": "direct",
     "default_domain_resolver": "upstream-cloudflare"
-  }
+  },
+  "certificate_providers": [
+    {
+      "type": "acme",
+      "tag": "s1-tls",
+      "domain": [
+        "${TUNNEL_DOMAIN}"
+      ],
+      "data_directory": "/var/lib/sing-box",
+      "disable_tls_alpn_challenge": true
+    }
+  ]
 }

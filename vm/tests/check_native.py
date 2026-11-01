@@ -41,13 +41,14 @@ def check():
     img = image()
     with tempfile.TemporaryDirectory(prefix="internet-s1-native-") as tmp:
         tmp = Path(tmp)
-        cert_dir = tmp / "tls"
-        cert_dir.mkdir()
+        domain = "miu.alegria.by"
+        # Mock the exact CertMagic file layout that Line1 ACME shares with Line2.
+        cert_dir = tmp / "certificates" / "acme-v02.api.letsencrypt.org-directory" / domain
+        cert_dir.mkdir(parents=True)
         run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-            "-keyout", str(cert_dir / "tunnel.key"), "-out", str(cert_dir / "tunnel.crt"),
-            "-subj", "/CN=miu.alegria.by")
-        (cert_dir / "proxy.crt").write_bytes((cert_dir / "tunnel.crt").read_bytes())
-        (cert_dir / "proxy.key").write_bytes((cert_dir / "tunnel.key").read_bytes())
+            "-keyout", str(cert_dir / (domain + ".key")),
+            "-out", str(cert_dir / (domain + ".crt")),
+            "-subj", "/CN=" + domain)
         configs = prepare(fixtures(), "miu.alegria.by", "www.cloudflare.com")
         for name in ("line1", "line2"):
             value = configs[name + ".json"]
@@ -57,7 +58,7 @@ def check():
             check_result = subprocess.run(
                 ["docker", "run", "--rm", "--network", "none",
                  "-v", str(tmp) + ":/check:ro",
-                 "-v", str(cert_dir) + ":/etc/sing-box/tls:ro",
+                 "-v", str(tmp) + ":/var/lib/sing-box:ro",
                  img, "check", "-c", "/check/" + name + ".json"],
                 capture_output=True, text=True)
             if check_result.returncode:

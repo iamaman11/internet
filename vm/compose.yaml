@@ -29,8 +29,8 @@ services:
     volumes:
       - ./runtime/line1.json:/etc/sing-box/config.json:ro
       - certificate-state:/var/lib/sing-box
-      - ./runtime/tls:/etc/sing-box/tls:ro
     ports:
+      - "80:80/tcp"
       - "443:443/tcp"
       - "8443:8443/udp"
       - "5443:5443/tcp"
@@ -44,6 +44,7 @@ services:
     command: ["run", "-c", "/etc/sing-box/config.json"]
     volumes:
       - ./runtime/line2.json:/etc/sing-box/config.json:ro
+      - certificate-state:/var/lib/sing-box:ro
       - ./runtime/tls:/etc/sing-box/tls:ro
     ports:
       - "3128:3128/tcp"

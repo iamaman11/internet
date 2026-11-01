@@ -6,7 +6,7 @@ import sys
 
 REQUIRED = {
     "warp-egress": set(),
-    "line1-gateway": {"443/tcp", "8443/udp", "5443/tcp", "9444/udp"},
+    "line1-gateway": {"80/tcp", "443/tcp", "8443/udp", "5443/tcp", "9444/udp"},
     "line2-proxy": {"3128/tcp", "1080/tcp", "9443/tcp", "4128/tcp", "4080/tcp", "4443/tcp"},
 }
 
@@ -32,6 +32,10 @@ def check(data):
         assert "NET_ADMIN" not in services[name].get("cap_add", [])
         assert not any(dev.get("source") == "/dev/net/tun"
                        for dev in services[name].get("devices", []))
+    l1 = services["line1-gateway"]["volumes"]
+    l2 = services["line2-proxy"]["volumes"]
+    assert any(v.get("target") == "/var/lib/sing-box" and not v.get("read_only", False) for v in l1)
+    assert any(v.get("target") == "/var/lib/sing-box" and v.get("read_only", False) for v in l2)
     assert not any("mesh" in name for name in services)
 
 

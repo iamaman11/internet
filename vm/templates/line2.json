@@ -62,8 +62,8 @@
       ],
       "tls": {
         "enabled": true,
-        "certificate_path": "/etc/sing-box/tls/proxy.crt",
-        "key_path": "/etc/sing-box/tls/proxy.key",
+        "certificate_path": "/var/lib/sing-box/certificates/acme-v02.api.letsencrypt.org-directory/${TUNNEL_DOMAIN}/${TUNNEL_DOMAIN}.crt",
+        "key_path": "/var/lib/sing-box/certificates/acme-v02.api.letsencrypt.org-directory/${TUNNEL_DOMAIN}/${TUNNEL_DOMAIN}.key",
         "min_version": "1.2",
         "alpn": [
           "h2",
@@ -108,8 +108,8 @@
       ],
       "tls": {
         "enabled": true,
-        "certificate_path": "/etc/sing-box/tls/proxy.crt",
-        "key_path": "/etc/sing-box/tls/proxy.key",
+        "certificate_path": "/var/lib/sing-box/certificates/acme-v02.api.letsencrypt.org-directory/${TUNNEL_DOMAIN}/${TUNNEL_DOMAIN}.crt",
+        "key_path": "/var/lib/sing-box/certificates/acme-v02.api.letsencrypt.org-directory/${TUNNEL_DOMAIN}/${TUNNEL_DOMAIN}.key",
         "min_version": "1.2",
         "alpn": [
           "h2",

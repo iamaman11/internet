@@ -54,6 +54,21 @@ class TopologyTests(unittest.TestCase):
         self.assertTrue(all(x.get("tls", {}).get("enabled") for x in c["inbounds"]
                             if x["listen_port"] in (9443,4443)))
 
+    def test_one_native_acme_owner_shared_with_line2(self):
+        one = load("line1.json")
+        two = load("line2.json")
+        self.assertEqual(len(one["certificate_providers"]), 1)
+        provider = one["certificate_providers"][0]
+        self.assertEqual(provider["type"], "acme")
+        self.assertEqual(provider["domain"], ["${TUNNEL_DOMAIN}"])
+        self.assertTrue(provider["disable_tls_alpn_challenge"])
+        self.assertEqual([x["tls"]["certificate_provider"] for x in one["inbounds"]
+                          if x["type"] == "hysteria2"], ["s1-tls", "s1-tls"])
+        for inbound in two["inbounds"]:
+            if inbound.get("tls", {}).get("enabled"):
+                self.assertIn("/var/lib/sing-box/certificates/", inbound["tls"]["certificate_path"])
+                self.assertIn("${TUNNEL_DOMAIN}", inbound["tls"]["certificate_path"])
+
     def test_warp_inbounds_never_route_direct(self):
         for name in ("line1.json", "line2.json"):
             c = load(name)
