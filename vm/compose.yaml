@@ -22,6 +22,7 @@ services:
     volumes:
       - ./runtime/line1.json:/etc/sing-box/config.json:ro
       - certificate-state:/var/lib/sing-box
+      - ./runtime/tls:/etc/sing-box/tls:ro
     ports:
       - "443:443/tcp"
       - "8443:8443/udp"
