@@ -1,6 +1,7 @@
 """S1 structural checks; physical egress and native sing-box check remain mandatory."""
 import json
 import pathlib
+import re
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1] / "templates"
@@ -30,6 +31,10 @@ def assert_routing_isolation(config, name):
     outbounds = {item["tag"]: item for item in config["outbounds"]}
     if outbounds.get("warp-local", {}).get("server") != "warp-egress":
         raise ValueError("warp egress target is missing")
+
+def warp_udp_supported(config):
+    socks = next(x for x in config["outbounds"] if x["tag"] == "warp-local")
+    return socks.get("network") != "tcp"
 
 class TopologyTests(unittest.TestCase):
     def test_line1_ports_and_auth(self):
@@ -72,6 +77,26 @@ class TopologyTests(unittest.TestCase):
         c["route"]["rules"] = [r for r in c["route"]["rules"]
             if "inbound" not in r]
         with self.assertRaisesRegex(ValueError, "warp inbound routed outside"):\n            assert_routing_isolation(c, "line2.json")
+
+    def test_warp_tcp_udp_capability_contract(self):
+        compose = (ROOT.parent / "compose.yaml").read_text(encoding="utf-8")
+        self.assertIn('WARP_ENABLE_NAT: "1"', compose)
+        self.assertIn('GOST_ARGS: "-L=socks5://:11080"', compose)
+        self.assertNotIn("cloudflare-mesh:", compose)
+        for name in ("line1.json", "line2.json"):
+            c = load(name)
+            socks = next(x for x in c["outbounds"] if x["tag"] == "warp-local")
+            self.assertEqual(socks["type"], "socks")
+            self.assertEqual(socks["server_port"], 11080)
+            # network=tcp used to silently exclude WARP UDP.
+            self.assertNotEqual(socks.get("network"), "tcp")
+
+    def test_negative_tcp_only_warp_is_rejected(self):
+        c = load("line1.json")
+        socks = next(x for x in c["outbounds"] if x["tag"] == "warp-local")
+        socks["network"] = "tcp"
+        self.assertEqual(socks["network"], "tcp")  # forbidden regression fixture
+        self.assertFalse(warp_udp_supported(c))
 
     def test_no_literal_credentials(self):
         for name in ("line1.json", "line2.json"):
