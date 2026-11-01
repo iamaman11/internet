@@ -1,0 +1,29 @@
+name: S1 VM contract
+
+# Run once when a complete S1 slice is ready; no production access in CI.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vm-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python topology and negative tests
+        run: python3 -m unittest discover -s vm/tests -p 'test_*.py' -v
+      - name: Native Docker Compose validation
+        run: |
+          docker compose version
+          docker compose --env-file vm/images.env.example -f vm/compose.yaml config --quiet
+          docker compose --env-file vm/images.env.example -f vm/compose.yaml config --format json > "${RUNNER_TEMP}/internet-compose.json"
+          python3 vm/tests/check_compose.py "${RUNNER_TEMP}/internet-compose.json"
+      - name: Verify no deployed secret material is committed
+        run: |
+          if git ls-files vm/runtime vm/state 'vm/*.pem' 'vm/*.key' | grep .; then
+            echo 'Runtime state or secret file tracked in Git' >&2
+            exit 1
+          fi
