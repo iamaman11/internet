@@ -1,0 +1,56 @@
+# S1 only: three dataplane services; Mesh remains deferred (#11).
+# Supply immutable, verified @sha256 images before running.
+name: internet
+
+services:
+  warp-egress:
+    image: ${INTERNET_WARP_IMAGE:?Set a verified WARP image pinned by digest}
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - warp-state:/var/lib/cloudflare-warp
+    networks:
+      - edge
+
+  line1-gateway:
+    image: ${INTERNET_SING_BOX_IMAGE:?Set a verified sing-box image pinned by digest}
+    restart: unless-stopped
+    command: ["run", "-c", "/etc/sing-box/config.json"]
+    volumes:
+      - ./runtime/line1.json:/etc/sing-box/config.json:ro
+      - certificate-state:/var/lib/sing-box
+    ports:
+      - "443:443/tcp"
+      - "8443:8443/udp"
+      - "5443:5443/tcp"
+      - "9444:9444/udp"
+    networks:
+      - edge
+
+  line2-proxy:
+    image: ${INTERNET_SING_BOX_IMAGE:?Set a verified sing-box image pinned by digest}
+    restart: unless-stopped
+    command: ["run", "-c", "/etc/sing-box/config.json"]
+    volumes:
+      - ./runtime/line2.json:/etc/sing-box/config.json:ro
+      - ./runtime/tls:/etc/sing-box/tls:ro
+    ports:
+      - "3128:3128/tcp"
+      - "1080:1080/tcp"
+      - "9443:9443/tcp"
+      - "4128:4128/tcp"
+      - "4080:4080/tcp"
+      - "4443:4443/tcp"
+    networks:
+      - edge
+
+networks:
+  edge:
+    driver: bridge
+
+volumes:
+  warp-state:
+  certificate-state:
