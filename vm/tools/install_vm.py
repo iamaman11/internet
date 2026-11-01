@@ -17,7 +17,6 @@ from render_runtime import prepare
 
 HOST = "64.176.74.102"
 VM_HOSTNAME = "internet-waw-1gb-20261101-151755-4af5b6"
-SOURCE_SHA = "4f688ed36e0d6a34ae4dbc14e624b1df6c0756a4"
 VM_SOURCE = "/tmp/internet-s1-src"
 VM_ROOT = "/opt/internet/vm"
 HOST_KEYS = "/mnt/c/Users/Bose/.ssh/known_hosts_internet_1gb_v1"
@@ -59,8 +58,11 @@ def main():
         raise ValueError("VAULT_BINDING_MISSING")
     payload = json.loads(Path(os.environ["INTERNET_VM_AUTH_FILE"]).read_text(encoding="utf-8"))
     files = prepare(payload, "miu.alegria.by", "www.cloudflare.com")
+    local_source = subprocess.run(["git", "-C", str(Path(__file__).resolve().parents[2]),
+                                   "rev-parse", "HEAD"], check=True, capture_output=True,
+                                  text=True).stdout.strip()
     reported = ssh("hostname; sudo -n id -u; git -C " + VM_SOURCE + " rev-parse HEAD").splitlines()
-    if reported != [VM_HOSTNAME, "0", SOURCE_SHA]:
+    if reported != [VM_HOSTNAME, "0", local_source]:
         raise RuntimeError("VM_IDENTITY_OR_SOURCE_MISMATCH")
     ssh("sudo -n install -d -m 755 /opt/internet " + VM_ROOT +
         " && sudo -n cp -a " + VM_SOURCE + "/vm/. " + VM_ROOT + "/"
