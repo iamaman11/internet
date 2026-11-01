@@ -131,7 +131,6 @@
       "server": "warp-egress",
       "server_port": 11080,
       "version": "5",
-      "network": "tcp",
       "domain_resolver": "docker-local"
     },
     {
