@@ -26,6 +26,10 @@ def check(data):
     warp = services["warp-egress"]
     assert warp["environment"]["WARP_ENABLE_NAT"] == "1"
     assert warp["environment"]["GOST_ARGS"] == "-L=socks5://:11080"
+    assert warp["entrypoint"] == ["/bin/sh", "/etc/internet/gost-guard-entrypoint.sh"], "guard must start first"
+    for target in ("/etc/internet/gost-guard-entrypoint.sh", "/etc/internet/gost-egress-guard.nft"):
+        assert any(m.get("target") == target and m.get("read_only") is True
+                   for m in warp["volumes"]), "missing read-only guard bind mount: " + target
     assert any(dev.get("source") == "/dev/net/tun" and dev.get("target") == "/dev/net/tun"
                for dev in warp["devices"])
     for name in ("line1-gateway", "line2-proxy"):
