@@ -15,6 +15,22 @@ def selected_outbound(config, tag):
             return rule["outbound"]
     return config["route"]["final"]
 
+def assert_routing_isolation(config, name):
+    tags = {item["tag"] for item in config["inbounds"]}
+    warp = ({"vless-reality-warp", "hy2-warp"} if name == "line1.json"
+            else {"http-proxy-auth", "socks-proxy-auth", "https-proxy-auth"})
+    if not warp <= tags:
+        raise ValueError("warp inbounds missing")
+    for tag in warp:
+        if selected_outbound(config, tag) != "warp-local":
+            raise ValueError("warp inbound routed outside warp-local: " + tag)
+    for tag in tags - warp:
+        if selected_outbound(config, tag) != "direct":
+            raise ValueError("direct inbound has unexpected route: " + tag)
+    outbounds = {item["tag"]: item for item in config["outbounds"]}
+    if outbounds.get("warp-local", {}).get("server") != "warp-egress":
+        raise ValueError("warp egress target is missing")
+
 class TopologyTests(unittest.TestCase):
     def test_line1_ports_and_auth(self):
         c = load("line1.json")
@@ -42,6 +58,7 @@ class TopologyTests(unittest.TestCase):
                        else x in ("http-proxy-auth","socks-proxy-auth","https-proxy-auth"))]
             direct = [x for x in tags if x not in warp]
             self.assertTrue(warp)
+            assert_routing_isolation(c, name)
             for tag in warp:
                 self.assertEqual(selected_outbound(c,tag), "warp-local")
             for tag in direct:
@@ -54,7 +71,7 @@ class TopologyTests(unittest.TestCase):
         c = load("line2.json")
         c["route"]["rules"] = [r for r in c["route"]["rules"]
             if "inbound" not in r]
-        self.assertNotEqual(selected_outbound(c,"http-proxy-auth"), "warp-local")
+        with self.assertRaisesRegex(ValueError, "warp inbound routed outside"):\n            assert_routing_isolation(c, "line2.json")
 
     def test_no_literal_credentials(self):
         for name in ("line1.json", "line2.json"):
