@@ -25,7 +25,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from install_vm import line2_image
 from render_runtime import prepare
-from probe_line2_local import http_response, public_ip
+from probe_line2_local import http_response, public_ip, ProbeError as HttpProbeError
 
 CONFIG = Path("/opt/internet/vm/runtime/line1.json")
 TARGET = "api.ipify.org"
@@ -209,7 +209,7 @@ def run_client(inbound, *, invalid=False, server="127.0.0.1"):
                 raise
             try:
                 return socks_egress(proxy)
-            except (OSError, ProbeError) as exc:
+            except (OSError, ProbeError, HttpProbeError) as exc:
                 if invalid:
                     raise InvalidAuthRejected("INVALID_AUTH_BLOCKED") from exc
                 raise
@@ -313,6 +313,11 @@ def main():
                     negative = "REJECTED"
                 else:
                     raise ProbeError("INVALID_AUTH_ACCEPTED")
+                # A post-negative successful request rules out a transient
+                # upstream outage being mislabeled as credential rejection.
+                recheck = run_client(inbound_map[tag], server=server)
+                if recheck != ip:
+                    raise ProbeError("POST_NEGATIVE_EGRESS_CHANGED")
             passed += 1
             print(tag + "=PASS egress=" + ip + " invalid_auth=" + negative, flush=True)
         except (OSError, ProbeError, TimeoutError, subprocess.SubprocessError) as exc:
