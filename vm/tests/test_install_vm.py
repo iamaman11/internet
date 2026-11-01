@@ -101,5 +101,60 @@ class InstallerSyncTests(unittest.TestCase):
             self.assertEqual(tar.getmember("runtime/line2.json").mode, 0o600)
 
 
+    def test_pinned_sing_box_image(self):
+        self.assertIn("@sha256:", installer.line2_image())
+
+    def test_scoped_recreate_checks_neighbors_and_native_config(self):
+        warp, line1, old, new = ("a" * 64, "b" * 64, "c" * 64, "d" * 64)
+        with patch.object(installer, "ssh", side_effect=[
+            warp + " true", line1 + " true", old + " true",
+            "", "", new + " true", warp + " true", line1 + " true",
+            "healthy",
+        ]) as call:
+            installer.apply_line2()
+            commands = [x.args[0] for x in call.call_args_list]
+            self.assertEqual(len(commands), 9)
+            self.assertIn("--network none", commands[3])
+            self.assertIn(" check -c /etc/sing-box/config.json", commands[3])
+            self.assertIn("--no-deps --force-recreate line2-proxy", commands[4])
+            self.assertNotIn("--force-recreate warp-egress", " ".join(commands))
+            self.assertNotIn("--force-recreate line1-gateway", " ".join(commands))
+
+    def test_failed_native_check_never_recreates_service(self):
+        with patch.object(installer, "ssh", side_effect=[
+            "a" * 64 + " true", "b" * 64 + " true",
+            "c" * 64 + " true", RuntimeError("REMOTE_OPERATION_FAILED"),
+        ]) as call:
+            with self.assertRaisesRegex(RuntimeError, "REMOTE_OPERATION_FAILED"):
+                installer.apply_line2()
+            commands = " ".join(x.args[0] for x in call.call_args_list)
+            self.assertNotIn("--force-recreate", commands)
+            self.assertEqual(call.call_count, 4)
+
+    def test_stopped_neighbor_blocks_apply(self):
+        with patch.object(installer, "ssh", return_value="a" * 64 + " false") as call:
+            with self.assertRaisesRegex(RuntimeError, "CONTAINER_NOT_RUNNING"):
+                installer.apply_line2()
+            self.assertEqual(call.call_count, 1)
+
+    def test_neighbor_identity_change_is_not_pass(self):
+        with patch.object(installer, "ssh", side_effect=[
+            "a" * 64 + " true", "b" * 64 + " true", "c" * 64 + " true",
+            "", "", "d" * 64 + " true", "e" * 64 + " true",
+        ]) as call:
+            with self.assertRaisesRegex(RuntimeError, "UNRELATED_CONTAINER_CHANGED"):
+                installer.apply_line2()
+            self.assertEqual(call.call_count, 7)
+
+    def test_no_recreate_receipt_rejected(self):
+        with patch.object(installer, "ssh", side_effect=[
+            "a" * 64 + " true", "b" * 64 + " true", "c" * 64 + " true",
+            "", "", "c" * 64 + " true",
+        ]) as call:
+            with self.assertRaisesRegex(RuntimeError, "LINE2_NOT_RECREATED"):
+                installer.apply_line2()
+            self.assertEqual(call.call_count, 6)
+
+
 if __name__ == "__main__":
     unittest.main()
