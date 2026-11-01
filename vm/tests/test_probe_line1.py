@@ -93,6 +93,48 @@ class TestLine1Probe(unittest.TestCase):
             with self.assertRaisesRegex(ProbeError, "VAULT_BINDING_MISSING"):
                 read_inbounds(from_vault=True)
 
+    def test_shared_http_probe_error_is_negative_only_for_invalid_auth(self):
+        from unittest.mock import Mock, patch
+        from probe_line1_local import run_client, InvalidAuthRejected
+        from probe_line2_local import ProbeError as HttpProbeError
+        fake = Mock(returncode=0)
+        with patch("probe_line1_local.subprocess.run", return_value=fake), \
+             patch("probe_line1_local.subprocess.Popen") as start, \
+             patch("probe_line1_local.wait_ready"), \
+             patch("probe_line1_local.socks_egress",
+                   side_effect=HttpProbeError("HTTP_REPLY_INVALID")), \
+             patch("probe_line1_local.line2_image", return_value="fake-image"):
+            start.return_value.poll.return_value = 1
+            with self.assertRaises(InvalidAuthRejected):
+                run_client(vless_inbound(), invalid=True)
+            with self.assertRaises(HttpProbeError):
+                run_client(vless_inbound(), invalid=False)
+
+    def test_negative_auth_requires_valid_egress_after_rejection(self):
+        from unittest.mock import patch
+        from probe_line1_local import main, InvalidAuthRejected
+        inbound = {"vless-reality-main": vless_inbound()}
+        with patch("sys.argv", ["probe", "--ports", "443", "--negative"]), \
+             patch("probe_line1_local.read_inbounds", return_value=inbound), \
+             patch("probe_line1_local.run_client", side_effect=[
+                 "64.176.74.102", InvalidAuthRejected("INVALID_AUTH_BLOCKED"),
+                 "64.176.74.102",
+             ]) as mock_run:
+            self.assertEqual(main(), 0)
+            self.assertEqual(mock_run.call_count, 3)
+
+    def test_negative_auth_recheck_mismatch_is_failure(self):
+        from unittest.mock import patch
+        from probe_line1_local import main, InvalidAuthRejected
+        inbound = {"vless-reality-main": vless_inbound()}
+        with patch("sys.argv", ["probe", "--ports", "443", "--negative"]), \
+             patch("probe_line1_local.read_inbounds", return_value=inbound), \
+             patch("probe_line1_local.run_client", side_effect=[
+                 "64.176.74.102", InvalidAuthRejected("INVALID_AUTH_BLOCKED"),
+                 "104.28.193.183",
+             ]):
+            self.assertEqual(main(), 1)
+
     def test_unknown_protocol_rejected(self):
         inbound = hy2_inbound()
         inbound["type"] = "http"
