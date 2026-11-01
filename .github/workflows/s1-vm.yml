@@ -29,6 +29,8 @@ jobs:
           python3 vm/tests/check_compose.py "${RUNNER_TEMP}/internet-compose.json"
       - name: Native sing-box 1.14.2 config checks (ephemeral credentials)
         run: python vm/tests/check_native.py
+      - name: Native Reality and Hysteria2 client checks (ephemeral credentials)
+        run: python vm/tests/probe_line1_local.py --fixture-native
       - name: Verify no deployed secret material is committed
         run: |
           if git ls-files vm/runtime vm/state 'vm/*.pem' 'vm/*.key' | grep .; then
