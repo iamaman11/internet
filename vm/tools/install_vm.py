@@ -82,7 +82,7 @@ def line2_image():
     path = Path(__file__).resolve().parents[1] / "images.env.example"
     images = [line.split("=", 1)[1].strip() for line in path.read_text().splitlines()
               if line.startswith("INTERNET_SING_BOX_IMAGE=")]
-    if len(images) != 1 or not re.fullmatch(r"[\\w./:-]+@sha256:[a-f0-9]{64}", images[0]):
+    if len(images) != 1 or not re.fullmatch(r"[A-Za-z0-9_./:-]+@sha256:[a-f0-9]{64}", images[0]):
         raise ValueError("SING_BOX_IMAGE_NOT_PINNED")
     return images[0]
 
