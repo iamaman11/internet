@@ -13,8 +13,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Python with pinned crypto dependency
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependency
+        run: python -m pip install 'cryptography==43.0.3'
       - name: Python topology and negative tests
-        run: python3 -m unittest discover -s vm/tests -p 'test_*.py' -v
+        run: python -m unittest discover -s vm/tests -p 'test_*.py' -v
       - name: Native Docker Compose validation
         run: |
           docker compose version
@@ -22,7 +28,7 @@ jobs:
           docker compose --env-file vm/images.env.example -f vm/compose.yaml config --format json > "${RUNNER_TEMP}/internet-compose.json"
           python3 vm/tests/check_compose.py "${RUNNER_TEMP}/internet-compose.json"
       - name: Native sing-box 1.14.2 config checks (ephemeral credentials)
-        run: python3 vm/tests/check_native.py
+        run: python vm/tests/check_native.py
       - name: Verify no deployed secret material is committed
         run: |
           if git ls-files vm/runtime vm/state 'vm/*.pem' 'vm/*.key' | grep .; then
