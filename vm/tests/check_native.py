@@ -4,15 +4,15 @@
 No production secrets, no listening ports, no external service access.
 Docker executes the exact digest-pinned image from vm/images.env.example.
 """
-import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import tempfile
-import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
+import sys
+sys.path.insert(0, str(ROOT))
+from tools.render_runtime import prepare
 ENV = ROOT / "images.env.example"
 VARS = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 
@@ -32,7 +32,9 @@ def image():
 
 
 def fixtures(img):
-    reality = run("docker", "run", "--rm", "--network", "none", img, "generate", "reality-keypair").stdout
+    from tools.generate_auth import generate
+    reality = run("docker", "run", "--rm", "--network", "none",
+                  img, "generate", "reality-keypair").stdout
     values = {}
     for line in reality.splitlines():
         if ":" in line:
@@ -41,32 +43,10 @@ def fixtures(img):
     private = values.get("privatekey") or values.get("private key")
     if not private:
         raise ValueError("unable to create ephemeral Reality test key")
-    return {
-        "VLESS_UUID": str(uuid.uuid4()),
-        "VLESS_WARP_UUID": str(uuid.uuid4()),
-        "HY2_PASSWORD": "ephemeral-test-only-long-passphrase",
-        "HY2_WARP_PASSWORD": "ephemeral-test-only-long-passphrase",
-        "PROXY_USERNAME": "ephemeral-ci-user",
-        "PROXY_PASSWORD": "ephemeral-test-only-long-passphrase",
-        "REALITY_SERVER_NAME": "www.cloudflare.com",
-        "REALITY_PRIVATE_KEY": private,
-        "REALITY_WARP_PRIVATE_KEY": private,
-        "REALITY_SHORT_ID": "aabbccdd",
-        "REALITY_WARP_SHORT_ID": "aabbccdd",
-        "TUNNEL_DOMAIN": "miu.alegria.by",
-    }
-
-
-def render(template, credentials):
-    def replace(match):
-        name = match.group(1)
-        if name not in credentials:
-            raise ValueError("missing required parameter: " + name)
-        return credentials[name]
-    output = VARS.sub(replace, template)
-    if VARS.search(output):
-        raise ValueError("unresolved placeholder")
-    return output
+    payload = generate()
+    payload["reality_direct_private"] = private
+    payload["reality_warp_private"] = private
+    return payload
 
 
 def check():
@@ -80,11 +60,9 @@ def check():
             "-subj", "/CN=miu.alegria.by")
         (cert_dir / "proxy.crt").write_bytes((cert_dir / "tunnel.crt").read_bytes())
         (cert_dir / "proxy.key").write_bytes((cert_dir / "tunnel.key").read_bytes())
-        creds = fixtures(img)
+        configs = prepare(fixtures(img), "miu.alegria.by", "www.cloudflare.com")
         for name in ("line1", "line2"):
-            raw = (ROOT / "templates" / (name + ".json")).read_text()
-            value = render(raw, creds)
-            json.loads(value)
+            value = configs[name + ".json"]
             config_path = tmp / (name + ".json")
             config_path.write_text(value)
             os.chmod(config_path, 0o600)
