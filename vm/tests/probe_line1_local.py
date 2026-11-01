@@ -71,6 +71,7 @@ def outbound_for(inbound, *, invalid=False):
             "flow": users[0]["flow"],
             "tls": {
                 "enabled": True, "server_name": REALITY_NAME,
+                "utls": {"enabled": True, "fingerprint": "chrome"},
                 "reality": {"enabled": True, "public_key": public,
                             "short_id": reality["short_id"][0]},
             },
