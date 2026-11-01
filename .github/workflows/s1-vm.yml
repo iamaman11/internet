@@ -21,6 +21,8 @@ jobs:
           docker compose --env-file vm/images.env.example -f vm/compose.yaml config --quiet
           docker compose --env-file vm/images.env.example -f vm/compose.yaml config --format json > "${RUNNER_TEMP}/internet-compose.json"
           python3 vm/tests/check_compose.py "${RUNNER_TEMP}/internet-compose.json"
+      - name: Native sing-box 1.14.2 config checks (ephemeral credentials)
+        run: python3 vm/tests/check_native.py
       - name: Verify no deployed secret material is committed
         run: |
           if git ls-files vm/runtime vm/state 'vm/*.pem' 'vm/*.key' | grep .; then
