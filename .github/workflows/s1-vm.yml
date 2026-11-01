@@ -27,6 +27,13 @@ jobs:
           docker compose --env-file vm/images.env.example -f vm/compose.yaml config --quiet
           docker compose --env-file vm/images.env.example -f vm/compose.yaml config --format json > "${RUNNER_TEMP}/internet-compose.json"
           python3 vm/tests/check_compose.py "${RUNNER_TEMP}/internet-compose.json"
+      - name: Native nftables GOST guard syntax (no production effects)
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nftables
+          sudo nft --check -f vm/warp/gost-egress-guard.nft
+          sh -n vm/warp/gost-guard-entrypoint.sh
+          python vm/tests/check_gost_guard.py
       - name: Native sing-box 1.14.2 config checks (ephemeral credentials)
         run: python vm/tests/check_native.py
       - name: Native Reality and Hysteria2 client checks (ephemeral credentials)

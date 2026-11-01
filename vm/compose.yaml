@@ -6,6 +6,8 @@ services:
   warp-egress:
     image: ${INTERNET_WARP_IMAGE:?Set a verified WARP image pinned by digest}
     restart: unless-stopped
+    # Guard is installed before the image's original WARP/GOST entrypoint.
+    entrypoint: ["/bin/sh", "/etc/internet/gost-guard-entrypoint.sh"]
     # Full WARP network mode + GOST SOCKS5 UDP ASSOCIATE, never WARP proxy mode.
     environment:
       WARP_ENABLE_NAT: "1"
@@ -19,6 +21,8 @@ services:
       - /dev/net/tun:/dev/net/tun
     volumes:
       - warp-state:/var/lib/cloudflare-warp
+      - ./warp/gost-guard-entrypoint.sh:/etc/internet/gost-guard-entrypoint.sh:ro
+      - ./warp/gost-egress-guard.nft:/etc/internet/gost-egress-guard.nft:ro
     networks:
       - edge
 

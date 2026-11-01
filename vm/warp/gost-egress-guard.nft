@@ -1,0 +1,13 @@
+# I16: GOST (UID 1000 in the pinned WARP image) cannot egress via Docker eth0.
+# Separate nftables table: WARP may replace its own routing/firewall tables.
+# No general established bypass: new/old direct sockets remain blocked.
+table inet internet_gost_guard {
+    chain output {
+        type filter hook output priority -150; policy accept;
+        meta skuid 1000 oifname "lo" accept
+        meta skuid 1000 oifname "CloudflareWARP" accept
+        # Responses to incoming Docker bridge SOCKS/TCP/UDP sessions only.
+        meta skuid 1000 oifname "eth0" ct direction reply accept
+        meta skuid 1000 counter drop
+    }
+}
