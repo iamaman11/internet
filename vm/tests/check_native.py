@@ -5,16 +5,16 @@ No production secrets, no listening ports, no external service access.
 Docker executes the exact digest-pinned image from vm/images.env.example.
 """
 import os
+import re
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-import sys
 sys.path.insert(0, str(ROOT))
 from tools.render_runtime import prepare
 ENV = ROOT / "images.env.example"
-VARS = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 
 
 def run(*args, **kw):
