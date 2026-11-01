@@ -24,12 +24,14 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from install_vm import line2_image
+from render_runtime import prepare
 from probe_line2_local import http_response, public_ip
 
 CONFIG = Path("/opt/internet/vm/runtime/line1.json")
 TARGET = "api.ipify.org"
 DIRECT_IP = "64.176.74.102"
 CA_NAME = "miu.alegria.by"
+REMOTE_SERVER = "64.176.74.102"
 REALITY_NAME = "www.cloudflare.com"
 SPECS = (
     ("vless-reality-main", "vless", 443, "direct"),
@@ -40,6 +42,10 @@ SPECS = (
 
 
 class ProbeError(Exception):
+    pass
+
+
+class InvalidAuthRejected(ProbeError):
     pass
 
 
@@ -55,7 +61,7 @@ def public_from_private(private):
         raise ProbeError("REALITY_PRIVATE_KEY_INVALID") from exc
 
 
-def outbound_for(inbound, *, invalid=False):
+def outbound_for(inbound, *, invalid=False, server="127.0.0.1"):
     kind = inbound["type"]
     port = inbound["listen_port"]
     users = inbound["users"]
@@ -66,7 +72,7 @@ def outbound_for(inbound, *, invalid=False):
         public = public_from_private(reality["private_key"])
         uuid = "00000000-0000-4000-8000-000000000000" if invalid else users[0]["uuid"]
         return {
-            "type": "vless", "tag": "upstream", "server": "127.0.0.1",
+            "type": "vless", "tag": "upstream", "server": server,
             "server_port": port, "uuid": uuid,
             "flow": users[0]["flow"],
             "tls": {
@@ -78,7 +84,7 @@ def outbound_for(inbound, *, invalid=False):
         }
     if kind == "hysteria2":
         return {
-            "type": "hysteria2", "tag": "upstream", "server": "127.0.0.1",
+            "type": "hysteria2", "tag": "upstream", "server": server,
             "server_port": port,
             "password": "intentionally-invalid" if invalid else users[0]["password"],
             "up_mbps": 10, "down_mbps": 10,
@@ -87,12 +93,12 @@ def outbound_for(inbound, *, invalid=False):
     raise ProbeError("INBOUND_KIND_UNSUPPORTED")
 
 
-def config_for(inbound, proxy_port, *, invalid=False):
+def config_for(inbound, proxy_port, *, invalid=False, server="127.0.0.1"):
     return {
         "log": {"level": "error"},
         "inbounds": [{"type": "mixed", "tag": "local", "listen": "127.0.0.1",
                       "listen_port": proxy_port}],
-        "outbounds": [outbound_for(inbound, invalid=invalid)],
+        "outbounds": [outbound_for(inbound, invalid=invalid, server=server)],
         "route": {"final": "upstream"},
     }
 
@@ -175,13 +181,13 @@ def error_kind(raw):
     return "OTHER"
 
 
-def run_client(inbound, *, invalid=False):
+def run_client(inbound, *, invalid=False, server="127.0.0.1"):
     proxy = proxy_port()
     name = "internet-s1-line1-probe-" + str(os.getpid()) + "-" + str(inbound["listen_port"])
     with tempfile.TemporaryDirectory(prefix="internet-s1-line1-") as tmp:
         folder = Path(tmp)
         path = folder / "config.json"
-        path.write_text(json.dumps(config_for(inbound, proxy, invalid=invalid)),
+        path.write_text(json.dumps(config_for(inbound, proxy, invalid=invalid, server=server)),
                         encoding="utf-8")
         os.chmod(path, 0o600)
         args = ["docker", "run", "--rm", "--network", "host", "--name", name,
@@ -201,7 +207,12 @@ def run_client(inbound, *, invalid=False):
                     raise ProbeError("EPHEMERAL_CLIENT_EXITED:" +
                                      error_kind(stderr)) from exc
                 raise
-            return socks_egress(proxy)
+            try:
+                return socks_egress(proxy)
+            except (OSError, ProbeError) as exc:
+                if invalid:
+                    raise InvalidAuthRejected("INVALID_AUTH_BLOCKED") from exc
+                raise
         finally:
             if proc.poll() is None:
                 proc.terminate()
@@ -215,8 +226,15 @@ def run_client(inbound, *, invalid=False):
                 proc.wait(timeout=3)
 
 
-def read_inbounds():
-    config = json.loads(CONFIG.read_text(encoding="utf-8"))
+def read_inbounds(*, from_vault=False):
+    if from_vault:
+        path = os.environ.get("INTERNET_VM_AUTH_FILE")
+        if not path:
+            raise ProbeError("VAULT_BINDING_MISSING")
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        config = json.loads(prepare(payload, CA_NAME, REALITY_NAME)["line1.json"])
+    else:
+        config = json.loads(CONFIG.read_text(encoding="utf-8"))
     inbound_map = {entry["tag"]: entry for entry in config["inbounds"]}
     if len(inbound_map) != 4 or set(inbound_map) != {spec[0] for spec in SPECS}:
         raise ProbeError("LINE1_INBOUND_TAGS_MISMATCH")
@@ -264,6 +282,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--ports", default="443,8443,5443,9444")
     p.add_argument("--negative", action="store_true")
+    p.add_argument("--from-vault", action="store_true")
     p.add_argument("--fixture-native", action="store_true")
     args = p.parse_args()
     if args.fixture_native:
@@ -274,13 +293,14 @@ def main():
         raise ProbeError("PORT_SELECTION_INVALID") from exc
     if not selected or selected - {spec[2] for spec in SPECS}:
         raise ProbeError("PORT_SELECTION_INVALID")
-    inbound_map = read_inbounds()
+    inbound_map = read_inbounds(from_vault=args.from_vault)
+    server = REMOTE_SERVER if args.from_vault else "127.0.0.1"
     passed = 0
     for tag, kind, port, route in SPECS:
         if port not in selected:
             continue
         try:
-            ip = run_client(inbound_map[tag])
+            ip = run_client(inbound_map[tag], server=server)
             if route == "direct" and ip != DIRECT_IP:
                 raise ProbeError("DIRECT_EGRESS_MISMATCH")
             if route == "warp" and ip == DIRECT_IP:
@@ -288,12 +308,11 @@ def main():
             negative = "NOT_RUN"
             if args.negative:
                 try:
-                    rejected_ip = run_client(inbound_map[tag], invalid=True)
-                except (OSError, ProbeError, TimeoutError):
+                    run_client(inbound_map[tag], invalid=True, server=server)
+                except InvalidAuthRejected:
                     negative = "REJECTED"
                 else:
-                    if rejected_ip:
-                        raise ProbeError("INVALID_AUTH_ACCEPTED")
+                    raise ProbeError("INVALID_AUTH_ACCEPTED")
             passed += 1
             print(tag + "=PASS egress=" + ip + " invalid_auth=" + negative, flush=True)
         except (OSError, ProbeError, TimeoutError, subprocess.SubprocessError) as exc:
