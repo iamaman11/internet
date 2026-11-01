@@ -55,6 +55,7 @@ class TestLine1Probe(unittest.TestCase):
         self.assertEqual(outbound["server"], "127.0.0.1")
         self.assertEqual(outbound["server_port"], 443)
         self.assertEqual(outbound["tls"]["server_name"], "www.cloudflare.com")
+        self.assertEqual(outbound["tls"]["utls"], {"enabled": True, "fingerprint": "chrome"})
         self.assertTrue(outbound["tls"]["reality"]["public_key"])
         self.assertEqual(cfg["inbounds"][0]["listen"], "127.0.0.1")
 
