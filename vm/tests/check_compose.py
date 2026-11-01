@@ -26,10 +26,10 @@ def check(data):
     warp = services["warp-egress"]
     assert warp["environment"]["WARP_ENABLE_NAT"] == "1"
     assert warp["environment"]["GOST_ARGS"] == "-L=socks5://:11080"
-    assert "/dev/net/tun:/dev/net/tun" in warp["devices"]
+    assert any(dev.get("source") == "/dev/net/tun" and dev.get("target") == "/dev/net/tun"\n               for dev in warp["devices"])
     for name in ("line1-gateway", "line2-proxy"):
         assert "NET_ADMIN" not in services[name].get("cap_add", [])
-        assert "/dev/net/tun:/dev/net/tun" not in services[name].get("devices", [])
+        assert not any(dev.get("source") == "/dev/net/tun"\n                       for dev in services[name].get("devices", []))
     assert not any("mesh" in name for name in services)
 
 
