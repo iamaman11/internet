@@ -76,7 +76,8 @@ class TopologyTests(unittest.TestCase):
         c = load("line2.json")
         c["route"]["rules"] = [r for r in c["route"]["rules"]
             if "inbound" not in r]
-        with self.assertRaisesRegex(ValueError, "warp inbound routed outside"):\n            assert_routing_isolation(c, "line2.json")
+        with self.assertRaisesRegex(ValueError, "warp inbound routed outside"):
+            assert_routing_isolation(c, "line2.json")
 
     def test_warp_tcp_udp_capability_contract(self):
         compose = (ROOT.parent / "compose.yaml").read_text(encoding="utf-8")
