@@ -14,7 +14,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV = ROOT / "images.env.example"
-VARS = re.compile(r"\\$\\{([A-Z][A-Z0-9_]*)\\}")
+VARS = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 
 
 def run(*args, **kw):
