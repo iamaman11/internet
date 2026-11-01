@@ -153,6 +153,26 @@ def wait_ready(proc, port):
     raise ProbeError("EPHEMERAL_CLIENT_NOT_READY")
 
 
+def error_kind(raw):
+    """Convert untrusted Docker stderr to a fixed diagnostic, never echo secrets."""
+    value = raw.lower()
+    if b"permission denied" in value:
+        return "PERMISSION"
+    if b"address already in use" in value:
+        return "LISTENER_IN_USE"
+    if b"unknown field" in value or b"invalid field" in value:
+        return "CONFIG_FIELD"
+    if b"no such file or directory" in value:
+        return "FILE_MISSING"
+    if b"executable file not found" in value:
+        return "EXECUTABLE_MISSING"
+    if b"failed to create" in value:
+        return "CONTAINER_CREATE"
+    if b"error response from daemon" in value:
+        return "DOCKER_DAEMON"
+    return "OTHER"
+
+
 def run_client(inbound, *, invalid=False):
     proxy = proxy_port()
     name = "internet-s1-line1-probe-" + str(os.getpid()) + "-" + str(inbound["listen_port"])
@@ -165,9 +185,20 @@ def run_client(inbound, *, invalid=False):
         args = ["docker", "run", "--rm", "--network", "host", "--name", name,
                 "-v", str(folder) + ":/probe:ro", line2_image(),
                 "run", "-c", "/probe/config.json"]
-        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        validation = subprocess.run(args[:-3] + ["check", "-c", "/probe/config.json"],
+                                    capture_output=True, timeout=20)
+        if validation.returncode:
+            raise ProbeError("CLIENT_NATIVE_CHECK_FAILED:" + error_kind(validation.stderr))
+        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         try:
-            wait_ready(proc, proxy)
+            try:
+                wait_ready(proc, proxy)
+            except ProbeError as exc:
+                if proc.poll() is not None:
+                    _, stderr = proc.communicate(timeout=3)
+                    raise ProbeError("EPHEMERAL_CLIENT_EXITED:" +
+                                     error_kind(stderr)) from exc
+                raise
             return socks_egress(proxy)
         finally:
             if proc.poll() is None:
