@@ -19,7 +19,8 @@ import tempfile
 import time
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, PrivateFormat, NoEncryption
+import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from install_vm import line2_image
@@ -225,11 +226,47 @@ def read_inbounds():
     return inbound_map
 
 
+def fixture_native_check():
+    """Only throwaway generated fixtures; stdout may include Docker diagnostics."""
+    test_key = X25519PrivateKey.generate()
+    private = base64.urlsafe_b64encode(
+        test_key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
+    ).decode("ascii").rstrip("=")
+    vless = {"type": "vless", "listen_port": 443,
+             "users": [{"uuid": str(uuid.uuid4()), "flow": "xtls-rprx-vision"}],
+             "tls": {"reality": {"private_key": private, "short_id": ["aabbccdd"]}}}
+    hy2 = {"type": "hysteria2", "listen_port": 8443,
+           "users": [{"password": "dummy-test-password-not-a-secret"}]}
+    overall = True
+    for name, inbound in (("vless", vless), ("hysteria2", hy2)):
+        with tempfile.TemporaryDirectory(prefix="internet-s1-fixture-") as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(json.dumps(config_for(inbound, 18551)),
+                            encoding="utf-8")
+            os.chmod(path, 0o600)
+            cmd = ["docker", "run", "--rm", "--network", "none",
+                   "-v", tmp + ":/probe:ro", line2_image(),
+                   "check", "-c", "/probe/config.json"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+            print("FIXTURE_" + name.upper() + "_EXIT=" + str(result.returncode))
+            if result.returncode:
+                overall = False
+                # This command only reads a newly generated, nonproduction fixture.
+                # Replace generated credentials even if Docker quotes its config.
+                safe = result.stderr.replace(private, "<FIXTURE_PRIVATE>")
+                safe = safe.replace(vless["users"][0]["uuid"], "<FIXTURE_UUID>")
+                print("FIXTURE_ERROR=" + safe[-1000:].replace("\\n", " | "))
+    return 0 if overall else 1
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--ports", default="443,8443,5443,9444")
     p.add_argument("--negative", action="store_true")
+    p.add_argument("--fixture-native", action="store_true")
     args = p.parse_args()
+    if args.fixture_native:
+        return fixture_native_check()
     try:
         selected = {int(v) for v in args.ports.split(",")}
     except ValueError as exc:
