@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, NoEncryption
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from probe_line1_local import SPECS, ProbeError, config_for, outbound_for, public_from_private
+from probe_line1_local import SPECS, ProbeError, config_for, outbound_for, public_from_private, read_inbounds, REMOTE_SERVER
 
 
 def private_test_key():
@@ -79,6 +79,19 @@ class TestLine1Probe(unittest.TestCase):
         inbound["tls"]["reality"]["private_key"] = "too-short"
         with self.assertRaisesRegex(ProbeError, "REALITY_PRIVATE_KEY_INVALID"):
             outbound_for(inbound)
+
+    def test_external_mode_uses_target_vm_without_changing_local_default(self):
+        local = config_for(vless_inbound(), 18452)
+        external = config_for(vless_inbound(), 18452, server=REMOTE_SERVER)
+        self.assertEqual(local["outbounds"][0]["server"], "127.0.0.1")
+        self.assertEqual(external["outbounds"][0]["server"], "64.176.74.102")
+
+    def test_external_mode_requires_existing_vault_binding(self):
+        import os
+        from unittest.mock import patch
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ProbeError, "VAULT_BINDING_MISSING"):
+                read_inbounds(from_vault=True)
 
     def test_unknown_protocol_rejected(self):
         inbound = hy2_inbound()
