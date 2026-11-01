@@ -31,22 +31,10 @@ def image():
     raise ValueError("sing-box image missing")
 
 
-def fixtures(img):
+def fixtures():
+    # Validate exactly the Reality keys emitted by the production generator.
     from tools.generate_auth import generate
-    reality = run("docker", "run", "--rm", "--network", "none",
-                  img, "generate", "reality-keypair").stdout
-    values = {}
-    for line in reality.splitlines():
-        if ":" in line:
-            key, val = line.split(":", 1)
-            values[key.strip().lower()] = val.strip()
-    private = values.get("privatekey") or values.get("private key")
-    if not private:
-        raise ValueError("unable to create ephemeral Reality test key")
-    payload = generate()
-    payload["reality_direct_private"] = private
-    payload["reality_warp_private"] = private
-    return payload
+    return generate()
 
 
 def check():
@@ -60,7 +48,7 @@ def check():
             "-subj", "/CN=miu.alegria.by")
         (cert_dir / "proxy.crt").write_bytes((cert_dir / "tunnel.crt").read_bytes())
         (cert_dir / "proxy.key").write_bytes((cert_dir / "tunnel.key").read_bytes())
-        configs = prepare(fixtures(img), "miu.alegria.by", "www.cloudflare.com")
+        configs = prepare(fixtures(), "miu.alegria.by", "www.cloudflare.com")
         for name in ("line1", "line2"):
             value = configs[name + ".json"]
             config_path = tmp / (name + ".json")
