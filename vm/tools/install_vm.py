@@ -9,6 +9,8 @@ import argparse
 import io
 import json
 import os
+import re
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -75,10 +77,61 @@ def archive(files, *, only="all"):
     return stream.getvalue()
 
 
+
+def line2_image():
+    path = Path(__file__).resolve().parents[1] / "images.env.example"
+    images = [line.split("=", 1)[1].strip() for line in path.read_text().splitlines()
+              if line.startswith("INTERNET_SING_BOX_IMAGE=")]
+    if len(images) != 1 or not re.fullmatch(r"[\\w./:-]+@sha256:[a-f0-9]{64}", images[0]):
+        raise ValueError("SING_BOX_IMAGE_NOT_PINNED")
+    return images[0]
+
+
+def container_identity(name):
+    if name not in ("internet-warp-egress-1", "internet-line1-gateway-1",
+                    "internet-line2-proxy-1"):
+        raise ValueError("CONTAINER_OUT_OF_SCOPE")
+    response = ssh("sudo -n docker inspect --format '{{.Id}} {{.State.Running}}' " + name)
+    parts = response.split()
+    if len(parts) != 2 or not re.fullmatch(r"[a-f0-9]{64}", parts[0]) or parts[1] != "true":
+        raise RuntimeError("CONTAINER_NOT_RUNNING:" + name)
+    return parts[0]
+
+
+def apply_line2():
+    """Validate installed config, recreate Line2 only, verify neighbor IDs."""
+    neighbors = ("internet-warp-egress-1", "internet-line1-gateway-1")
+    baseline = {name: container_identity(name) for name in neighbors}
+    previous = container_identity("internet-line2-proxy-1")
+    image = shlex.quote(line2_image())
+    config_mount = shlex.quote(VM_ROOT + "/runtime/line2.json:/etc/sing-box/config.json:ro")
+    ssh("sudo -n docker run --rm --pull=never --network none"
+        " -v " + config_mount +
+        " -v internet_certificate-state:/var/lib/sing-box:ro " + image +
+        " check -c /etc/sing-box/config.json >/dev/null")
+    ssh("sudo -n docker compose --env-file " + VM_ROOT + "/images.env.example"
+        " -f " + VM_ROOT + "/compose.yaml up -d --no-deps --force-recreate line2-proxy")
+    current = container_identity("internet-line2-proxy-1")
+    if current == previous:
+        raise RuntimeError("LINE2_NOT_RECREATED")
+    for name, expected in baseline.items():
+        if container_identity(name) != expected:
+            raise RuntimeError("UNRELATED_CONTAINER_CHANGED:" + name)
+    if ssh("sudo -n docker inspect --format '{{.State.Health.Status}}'"
+           " internet-warp-egress-1") != "healthy":
+        raise RuntimeError("WARP_HEALTH_NOT_CONFIRMED")
+    print("LINE2_NATIVE_CHECK=PASS")
+    print("LINE2_SCOPED_RECREATE=PASS")
+    print("NEIGHBOR_IDENTITIES_UNCHANGED=PASS")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--only", choices=("all", "line2"), default="all")
+    parser.add_argument("--apply-line2", action="store_true")
     args = parser.parse_args()
+    if args.apply_line2 and args.only != "line2":
+        raise ValueError("APPLY_LINE2_REQUIRES_ONLY_LINE2")
     if not all(os.environ.get(x) for x in ("INTERNET_VM_AUTH_FILE", "INTERNET_SSH_KEY")):
         raise ValueError("VAULT_BINDING_MISSING")
     source = str(Path(__file__).resolve().parents[2])
@@ -108,6 +161,8 @@ def main():
     print("CONFIG_INSTALL=PASS")
     print("CONFIG_MODE=0600")
     print("DOCKER_COMPOSE_CONFIG=PASS")
+    if args.apply_line2:
+        apply_line2()
 
 
 if __name__ == "__main__":
