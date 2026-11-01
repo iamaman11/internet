@@ -71,7 +71,7 @@ def main():
     receipt = ssh("sudo -n stat -c %a " + VM_ROOT + "/runtime/line1.json " +
                   VM_ROOT + "/runtime/line2.json; "
                   "sudo -n docker compose --env-file " + VM_ROOT + "/images.env.example "
-                  "-f " + VM_ROOT + "/compose.yaml config --quiet; echo COMPOSE_VALID")
+                  "-f " + VM_ROOT + "/compose.yaml config --quiet && echo COMPOSE_VALID")
     if receipt.splitlines() != ["600", "600", "COMPOSE_VALID"]:
         raise RuntimeError("INSTALL_READBACK_UNEXPECTED")
     print("VM_IDENTITY=PASS")
