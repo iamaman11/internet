@@ -1,0 +1,9 @@
+# Generated runtime configurations and secrets must never be committed.
+/runtime/
+/state/
+/.env
+/.env.*
+*.pem
+*.key
+*.p12
+*.pfx
