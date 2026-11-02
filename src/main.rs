@@ -30,7 +30,7 @@ fn emit(v: &Value, json_mode: bool) {
     }
 }
 fn diagnostic_output(ids: &[&str], deep: bool, json_mode: bool, check_scope: bool) -> i32 {
-    let result: Vec<_> = ids.iter().map(|id| diagnostic::inspect(id, deep)).collect();
+    let result = diagnostic::batch(ids, deep);
     let failed = result
         .iter()
         .any(|d| matches!(d.health, Health::Failed | Health::Unsupported));

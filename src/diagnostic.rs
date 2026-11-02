@@ -7,13 +7,16 @@ use crate::{
 use chrono::Utc;
 use std::{
     net::{SocketAddr, TcpStream},
-    time::{Duration, Instant},
+    time::Duration,
 };
-pub const IDS: [&str; 7] = [
+pub const IDS: [&str; 10] = [
+    "internet",
+    "windows",
     "windows/network",
     "windows/sing-box",
     "windows/desktop-selector",
     "windows/wsl-selector",
+    "vultr",
     "vultr/vm",
     "vultr/line1",
     "vultr/line2",
@@ -21,32 +24,142 @@ pub const IDS: [&str; 7] = [
 fn now() -> Option<String> {
     Some(Utc::now().to_rfc3339())
 }
+/// One local task readback for a whole CLI request, never a cached process or DB.
+pub fn batch(ids: &[&str], deep: bool) -> Vec<Diagnostic> {
+    let needs_task = ids.iter().any(|id| {
+        matches!(
+            *id,
+            "windows/sing-box" | "windows/desktop-selector" | "windows/wsl-selector"
+        )
+    });
+    let task = if needs_task && cfg!(windows) {
+        Some(lifecycle::is_running())
+    } else {
+        None
+    };
+    ids.iter()
+        .map(|id| inspect_with_task(id, deep, task.as_ref()))
+        .collect()
+}
 pub fn inspect(id: &str, deep: bool) -> Diagnostic {
+    inspect_with_task(id, deep, None)
+}
+fn task_running(task: Option<&Result<bool, &'static str>>) -> Result<bool, &'static str> {
+    match task {
+        Some(observed) => *observed,
+        None => lifecycle::is_running(),
+    }
+}
+fn node(
+    id: &str,
+    kind: &'static str,
+    owner: &'static str,
+    parent: Option<&'static str>,
+    next: &'static str,
+) -> Diagnostic {
+    let mut d = Diagnostic::unknown(id, kind, owner, next);
+    d.parent = parent;
+    d
+}
+fn inspect_with_task(
+    id: &str,
+    deep: bool,
+    task: Option<&Result<bool, &'static str>>,
+) -> Diagnostic {
     match id {
-        "windows/network" => Diagnostic::unknown(
+        "internet" => node(id, "application", "Rust INTERNET", None, "internet status"),
+        "windows" => node(id, "host", "Windows", Some("internet"), "internet status"),
+        "windows/network" => node(
             id,
             "network",
             "Windows",
+            Some("windows"),
             "Check Windows network separately; never mutate routes",
         ),
-        "vultr/vm" | "vultr/line1" | "vultr/line2" => Diagnostic::unknown(
+        "vultr" => node(
             id,
-            "remote",
-            "Vultr/Docker",
-            "Use verified Vault SSH and external network probes; remote not checked by local CLI",
+            "provider",
+            "Vultr",
+            Some("internet"),
+            "internet status --deep",
         ),
-        "windows/sing-box" => local_binary(),
-        "windows/desktop-selector" => local_selector(id, Target::Desktop, deep),
-        "windows/wsl-selector" => local_selector(id, Target::Wsl, deep),
-        _ => Diagnostic::unknown(
+        "vultr/vm" | "vultr/line1" | "vultr/line2" => remote_transport(id, deep),
+        "windows/sing-box" => local_binary(task),
+        "windows/desktop-selector" => local_selector(id, Target::Desktop, deep, task),
+        "windows/wsl-selector" => local_selector(id, Target::Wsl, deep, task),
+        _ => node(
             id,
             "unknown",
             "none",
+            None,
             "Use internet tree for known resource IDs",
         ),
     }
 }
-fn local_binary() -> Diagnostic {
+/// Public port reachability is only a transport observation. It never proves VM
+/// identity, TLS, authentication, UDP, Docker health or actual egress.
+fn remote_transport(id: &str, deep: bool) -> Diagnostic {
+    use std::net::{IpAddr, Ipv4Addr};
+    let parent = if id == "vultr/vm" {
+        "vultr"
+    } else {
+        "vultr/vm"
+    };
+    let mut d = node(
+        id,
+        "remote",
+        "Vultr/Docker",
+        Some(parent),
+        "Use Vault SSH and native Docker/protocol probes for actual service health",
+    );
+    if !deep {
+        return d;
+    }
+    let Ok(config) = config::read(&config::installed()) else {
+        d.reason_code = "LOCAL_CONFIG_UNAVAILABLE_FOR_REMOTE_PROBE";
+        return d;
+    };
+    let Some(host) = config
+        .pointer("/outbounds/0/server")
+        .and_then(|v| v.as_str())
+        .and_then(|v| v.parse::<Ipv4Addr>().ok())
+    else {
+        d.reason_code = "REMOTE_ENDPOINT_UNKNOWN";
+        return d;
+    };
+    let ports: &[u16] = match id {
+        "vultr/line1" => &[443, 5443],
+        "vultr/line2" => &[3128, 4080],
+        _ => &[443],
+    };
+    let mut available = 0;
+    for port in ports {
+        if TcpStream::connect_timeout(
+            &SocketAddr::new(IpAddr::V4(host), *port),
+            Duration::from_millis(450),
+        )
+        .is_ok()
+        {
+            available += 1;
+        }
+    }
+    d.source = "native-tcp-connect";
+    d.observed_at = now();
+    d.scope = "tcp_transport_only";
+    d.actual = Some(format!(
+        "{} of {} TCP ports reachable",
+        available,
+        ports.len()
+    ));
+    d.reason_code = if available == ports.len() {
+        "TCP_REACHABLE_PROTOCOL_EGRESS_NOT_CHECKED"
+    } else {
+        "TCP_REACHABILITY_INCOMPLETE"
+    };
+    // Even TCP success cannot identify the remote VM or prove end-to-end health.
+    d
+}
+fn local_binary(task: Option<&Result<bool, &'static str>>) -> Diagnostic {
     let id = "windows/sing-box";
     let mut d = Diagnostic::unknown(
         id,
@@ -72,7 +185,7 @@ fn local_binary() -> Diagnostic {
         d.reason_code = "NOT_CONFIGURED";
         return d;
     }
-    match lifecycle::is_running() {
+    match task_running(task) {
         Ok(true) => {
             d.health = Health::Healthy;
             d.reason_code = "TASK_RUNNING";
@@ -91,7 +204,12 @@ fn local_binary() -> Diagnostic {
     }
     d
 }
-fn local_selector(id: &str, target: Target, deep: bool) -> Diagnostic {
+fn local_selector(
+    id: &str,
+    target: Target,
+    deep: bool,
+    task: Option<&Result<bool, &'static str>>,
+) -> Diagnostic {
     let mut d = Diagnostic::unknown(
         id,
         "selector",
@@ -114,7 +232,7 @@ fn local_selector(id: &str, target: Target, deep: bool) -> Diagnostic {
                     .map(|r| r.to_string())
                     .unwrap_or_else(|_| "invalid".into()),
             );
-            match lifecycle::is_running() {
+            match task_running(task) {
                 Ok(true) => match selector::runtime_selected(target) {
                     Ok(r) if Some(r.to_string()) == d.actual => {
                         d.health = Health::Healthy;
@@ -196,16 +314,7 @@ fn local_selector(id: &str, target: Target, deep: bool) -> Diagnostic {
     d
 }
 pub fn all(deep: bool) -> Vec<Diagnostic> {
-    let begin = Instant::now();
-    IDS.iter()
-        .map(|id| {
-            if begin.elapsed() > Duration::from_secs(10) {
-                Diagnostic::unknown(id, "timeout", "none", "Retry specific resource inspect")
-            } else {
-                inspect(id, deep)
-            }
-        })
-        .collect()
+    batch(&IDS, deep)
 }
 
 #[cfg(test)]
@@ -218,10 +327,35 @@ mod tests {
         assert!(d.observed_at.is_none());
     }
     #[test]
-    fn no_duplicate_resource_ids() {
-        let mut s = std::collections::HashSet::new();
+    fn tree_is_closed_and_acyclic() {
+        let mut ids = std::collections::HashSet::new();
         for id in IDS {
-            assert!(s.insert(id));
+            assert!(ids.insert(id), "duplicate resource id: {id}");
         }
+        for id in IDS {
+            let node = inspect(id, false);
+            if let Some(parent) = node.parent {
+                assert!(ids.contains(parent), "orphan: {id} -> {parent}");
+                assert_ne!(id, parent, "self-parent");
+                let mut ancestor = parent;
+                let mut visited = std::collections::HashSet::new();
+                while let Some(next) = inspect(ancestor, false).parent {
+                    assert!(visited.insert(ancestor), "parent cycle at {ancestor}");
+                    ancestor = next;
+                }
+            } else {
+                assert_eq!(id, "internet", "unexpected root: {id}");
+            }
+            for dep in node.dependencies {
+                assert!(ids.contains(dep), "unknown dependency {dep} of {id}");
+            }
+        }
+    }
+    #[test]
+    fn remote_not_checked_is_not_fabricated() {
+        let d = inspect("vultr/line2", false);
+        assert_eq!(d.health, Health::Unknown);
+        assert_eq!(d.reason_code, "NOT_CHECKED");
+        assert!(d.observed_at.is_none());
     }
 }
