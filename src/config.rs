@@ -326,4 +326,45 @@ mod tests {
     #[test]
     fn scoped_gateway_binding_and_wsl_auth() {
         let original = fixture();
-        let gateway: std::net::Ipv4Addr = "172.26.16.
+        let gateway: std::net::Ipv4Addr = "172.26.16.1".parse().unwrap();
+        let next = with_wsl_gateway(&original, gateway).unwrap();
+        assert_eq!(next["inbounds"][1]["listen"], "172.26.16.1");
+        assert_eq!(original["inbounds"][1]["listen"], "127.0.0.1");
+        let mut bad = next.clone();
+        bad["inbounds"][1].as_object_mut().unwrap().remove("users");
+        assert_eq!(validate(&bad), Err("CONFIG_WSL_AUTH_REQUIRED"));
+    }
+    #[test]
+    fn target_changes_do_not_touch_other_selector() {
+        let c = fixture();
+        assert!(validate(&c).is_ok());
+        let n = with_selected(&c, Target::Wsl, Route::WarpVless).unwrap();
+        assert_eq!(selected(&n, Target::Wsl).unwrap(), Route::WarpVless);
+        assert_eq!(selected(&n, Target::Desktop).unwrap(), Route::DirectAuto);
+        assert_eq!(selected(&c, Target::Wsl).unwrap(), Route::DirectAuto);
+    }
+    #[test]
+    fn reject_warp_to_direct_fallback() {
+        let mut c = fixture();
+        c["outbounds"][5]["outbounds"][0] = Value::String("direct-vless".into());
+        assert_eq!(validate(&c), Err("CONFIG_AUTO_FALLBACK_FORBIDDEN"));
+    }
+    #[test]
+    fn reject_tun_or_exposed_listeners() {
+        let mut c = fixture();
+        c["inbounds"][1]["listen"] = Value::String("0.0.0.0".into());
+        assert_eq!(validate(&c), Err("CONFIG_INBOUND_UNSAFE"));
+        let mut c = fixture();
+        c["inbounds"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"type":"tun"}));
+        assert_eq!(validate(&c), Err("CONFIG_SCOPE_MISMATCH"));
+    }
+    #[test]
+    fn no_unchecked_fallback_endpoints() {
+        let mut c = fixture();
+        c["outbounds"][2]["tls"]["insecure"] = Value::Bool(true);
+        assert_eq!(validate(&c), Err("CONFIG_TLS_INSECURE"));
+    }
+}
