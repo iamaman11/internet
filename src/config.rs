@@ -40,11 +40,19 @@ pub fn validate(c: &Value) -> Result<(), &'static str> {
     }
     for (target, port) in [(Target::Desktop, 2080), (Target::Wsl, 2081)] {
         let inbound = by_tag(inbounds, target.listener())?;
-        if inbound["type"] != "mixed"
-            || inbound["listen"] != "127.0.0.1"
-            || inbound["listen_port"].as_u64() != Some(port)
-        {
+        let addr=inbound["listen"].as_str().ok_or("CONFIG_INBOUND_UNSAFE")?;
+        let bind_ok=if target==Target::Desktop { addr=="127.0.0.1" }
+            else { addr=="127.0.0.1" || addr.parse::<std::net::Ipv4Addr>()
+                .is_ok_and(|ip|ip.is_private()&&!ip.is_unspecified()&&!ip.is_loopback()) };
+        if inbound["type"]!="mixed" || !bind_ok || inbound["listen_port"].as_u64()!=Some(port) {
             return Err("CONFIG_INBOUND_UNSAFE");
+        }
+        if target==Target::Wsl {
+            let users=inbound["users"].as_array().ok_or("CONFIG_WSL_AUTH_REQUIRED")?;
+            if users.len()!=1 || users[0]["username"].as_str().is_none_or(str::is_empty)
+                || users[0]["password"].as_str().is_none_or(str::is_empty) {
+                return Err("CONFIG_WSL_AUTH_REQUIRED");
+            }
         }
         let count = rules
             .iter()
@@ -162,6 +170,17 @@ pub fn with_selected(
     validate(&next)?;
     Ok(next)
 }
+pub fn with_wsl_gateway(original: &Value, gateway: std::net::Ipv4Addr) -> Result<Value,&'static str> {
+    validate(original)?;
+    if !gateway.is_private() || gateway.is_loopback() { return Err("WSL_GATEWAY_INVALID"); }
+    let mut next=original.clone();
+    let inbound=next.get_mut("inbounds").and_then(Value::as_array_mut)
+        .ok_or("CONFIG_INBOUND_UNSAFE")?.iter_mut()
+        .find(|v|v["tag"]=="wsl-in").ok_or("CONFIG_INBOUND_UNSAFE")?;
+    inbound["listen"]=Value::String(gateway.to_string());
+    validate(&next)?;
+    Ok(next)
+}
 pub fn read(path: &Path) -> Result<Value, &'static str> {
     let raw = fs::read(path).map_err(|_| "CONFIG_NOT_CONFIGURED")?;
     let parsed: Value = serde_json::from_slice(&raw).map_err(|_| "CONFIG_JSON_INVALID")?;
@@ -218,7 +237,6 @@ pub fn write_checked(path: &Path, c: &Value) -> Result<(), &'static str> {
         let had_old = path.exists();
         if had_old {
             fs::copy(path, &previous).map_err(|_| "CONFIG_BACKUP_FAILED")?;
-            fs::remove_file(path).map_err(|_| "CONFIG_REPLACE_FAILED")?;
         }
         if fs::rename(&temporary, path).is_err() {
             if had_old {
@@ -266,11 +284,22 @@ mod tests {
         }
         serde_json::json!({"inbounds":[
             {"type":"mixed","tag":"desktop-in","listen":"127.0.0.1","listen_port":2080},
-            {"type":"mixed","tag":"wsl-in","listen":"127.0.0.1","listen_port":2081}],
+            {"type":"mixed","tag":"wsl-in","listen":"127.0.0.1","listen_port":2081,"users":[{"username":"test","password":"test-password"}]}],
             "outbounds":out,
             "route":{"rules":[{"inbound":["desktop-in"],"outbound":"desktop-selector"},
                               {"inbound":["wsl-in"],"outbound":"wsl-selector"}],"final":"desktop-selector"},
             "experimental":{"clash_api":{"external_controller":"127.0.0.1:9090"}}})
+    }
+    #[test]
+    fn scoped_gateway_binding_and_wsl_auth() {
+        let original=fixture();
+        let gateway:std::net::Ipv4Addr="172.26.16.1".parse().unwrap();
+        let next=with_wsl_gateway(&original,gateway).unwrap();
+        assert_eq!(next["inbounds"][1]["listen"],"172.26.16.1");
+        assert_eq!(original["inbounds"][1]["listen"],"127.0.0.1");
+        let mut bad=next.clone();
+        bad["inbounds"][1].as_object_mut().unwrap().remove("users");
+        assert_eq!(validate(&bad),Err("CONFIG_WSL_AUTH_REQUIRED"));
     }
     #[test]
     fn target_changes_do_not_touch_other_selector() {
