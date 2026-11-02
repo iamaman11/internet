@@ -53,6 +53,11 @@ try {
     & python (Join-Path $PSScriptRoot 'check_restore.py')
     if ($LASTEXITCODE -ne 0) { throw 'U2_STOPPED_RESTORE_CI_FAILED' }
 
+    # One ephemeral native sing-box process: local rule-set file watcher
+    # really changes routing without restarting the process. No TUN/VM.
+    & python (Join-Path $PSScriptRoot 'check_hot_rules.py')
+    if ($LASTEXITCODE -ne 0) { throw 'U3_NATIVE_HOT_RELOAD_CI_FAILED' }
+
     # The manifest is updated to reflect a defective candidate executable.
     # It passes hash checks; the CLI self-check must fail and roll back the
     # previous working EXE, without destroying its configuration.

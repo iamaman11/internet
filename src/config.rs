@@ -40,7 +40,10 @@ pub fn validate(c: &Value) -> Result<(), &'static str> {
         || outbounds.len() != if tun_enabled { 9 } else { 8 }
         || rules.len()
             != if tun_enabled {
-                if rules.get(2).and_then(|r| r.get("process_name")).is_some() {
+                if rules
+                    .get(2)
+                    .is_some_and(|r| r.get("process_name").is_some() || r.get("rule_set").is_some())
+                {
                     4
                 } else {
                     3
@@ -174,8 +177,7 @@ pub fn validate(c: &Value) -> Result<(), &'static str> {
     if c.pointer("/route/final").and_then(Value::as_str) != Some(Target::Desktop.selector()) {
         return Err("CONFIG_DEFAULT_ROUTE_UNSAFE");
     }
-    if c.pointer("/route/rule_set").is_some()
-        || c.pointer("/inbounds/0/auto_route").is_some()
+    if c.pointer("/inbounds/0/auto_route").is_some()
         || c.pointer("/inbounds/1/auto_route").is_some()
     {
         return Err("CONFIG_SCOPE_EXCEEDED");
@@ -435,9 +437,10 @@ mod tests {
         assert_eq!(tun["inbounds"].as_array().unwrap().len(), 3);
         assert_eq!(tun["route"]["rules"].as_array().unwrap().len(), 4);
         assert_eq!(
-            tun["route"]["rules"][2]["process_name"],
-            serde_json::json!(["firefox.exe"])
+            tun["route"]["rules"][2]["rule_set"],
+            serde_json::json!(["internet-selected-apps"])
         );
+        assert_eq!(tun["route"]["rule_set"][0]["type"], "local");
         assert_eq!(selected(&tun, Target::Desktop).unwrap(), Route::DirectAuto);
         assert_eq!(selected(&tun, Target::Wsl).unwrap(), Route::DirectAuto);
         let changed = with_selected(&tun, Target::Desktop, Route::WarpVless).unwrap();
@@ -452,7 +455,7 @@ mod tests {
         assert_eq!(validate(&bad), Err("TUN_CONTROL_EXCLUSION_MISSING"));
         let mut bad = tun.clone();
         bad["route"]["rules"][3]["outbound"] = "desktop-selector".into();
-        assert_eq!(validate(&bad), Err("TUN_ROUTE_UNSAFE"));
+        assert_eq!(validate(&bad), Err("TUN_HOT_RULESET_INVALID"));
         let mut bad = tun.clone();
         bad["outbounds"][8]["type"] = "selector".into();
         assert_eq!(validate(&bad), Err("TUN_ROUTE_UNSAFE"));

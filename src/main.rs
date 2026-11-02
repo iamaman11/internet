@@ -272,6 +272,10 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         ("selected-apps", ["selected-apps", "remove", name]) => {
             tun::change_application(false, name)
         }
+        ("app", ["app", "list"]) | ("app", ["app", "status"]) => tun::app_list(),
+        ("app", ["app", "edge", "vm"]) => tun::app_set_edge(true),
+        ("app", ["app", "edge", "direct"]) => tun::app_set_edge(false),
+        ("app", ["app", "diagnose", "edge"]) => tun::app_diagnose_edge(),
         ("proxies", ["proxies", "list"]) => proxies::list(),
         ("proxies", ["proxies", "test"]) => {
             return match proxies::test() {
@@ -323,6 +327,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
             "wsl route <same>","start","stop","restart","configure --stdin",
             "backup export <external-directory>","restore <external-directory>",
              "tun <status|on|off>","selected-apps <status|on|off|add EXE|remove EXE>",
+            "app <list|status|edge vm|edge direct|diagnose edge>",
             "proxies <list|test|credentials>"],
              "note":"S4 native TUN has control-IP exclusion; selected-apps bypass is DIRECT outbound, not kernel bypass"}),
         ),
@@ -345,7 +350,12 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         }
         Err(code) => {
             emit(
-                &json!({"ok":false,"reason_code":code,"next_action": "internet help"}),
+                &json!({"ok":false,"reason_code":code,
+                    "next_action": if code=="APP_TUN_OFF_ENABLE_EXPLICITLY" {
+                        "internet tun on (changes Windows routes; verify independent control)"
+                    } else if code=="APP_DIRECT_REQUIRES_SELECTED_APPS" {
+                        "internet selected-apps on (changes routing for other applications)"
+                    } else { "internet help" }}),
                 json_mode,
             );
             if code == "WINDOWS_ONLY"
@@ -513,6 +523,9 @@ fn menu() -> i32 {
         println!(" 11. Test six proxies (real HTTPS egress)");
         println!(" 12. Status");
         println!(" 13. Diagnose");
+        println!(" 14. Edge — route through VM");
+        println!(" 15. Edge — direct internet");
+        println!(" 16. Edge — inspect route");
         println!("  0. Exit");
         let Some(choice) = read_choice("\nChoice: ") else {
             return 0;
@@ -559,6 +572,9 @@ fn menu() -> i32 {
             "11" => Some(vec!["proxies".into(), "test".into()]),
             "12" => Some(vec!["status".into()]),
             "13" => Some(vec!["diagnose".into()]),
+            "14" => Some(vec!["app".into(), "edge".into(), "vm".into()]),
+            "15" => Some(vec!["app".into(), "edge".into(), "direct".into()]),
+            "16" => Some(vec!["app".into(), "diagnose".into(), "edge".into()]),
             _ => {
                 println!("Unknown choice.");
                 continue;
