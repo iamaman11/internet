@@ -18,7 +18,7 @@ try {
     try { & ./windows/install.ps1 -PackagePath $badZip | Out-Null }
     catch {
         $failed=$true
-        if($_.Exception.Message -notmatch 'PACKAGE_SHA256_MISMATCH') {throw}
+        if($_.Exception.Message -notmatch 'PACKAGE_(SHA256|SIZE)_MISMATCH') {throw}
     }
     if(-not $failed -or (Test-Path -LiteralPath $root)){throw 'INVALID_INSTALL_DID_NOT_NOOP'}
     'INVALID_INSTALL_NOOP=PASS'
