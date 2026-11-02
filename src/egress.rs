@@ -83,6 +83,43 @@ pub fn https(
     deadline: Instant,
     resolve: Option<&str>,
 ) -> Proof {
+    let mut command = Command::new("curl.exe");
+    command.arg("-q");
+    https_child(&mut command, proxy, auth, vm, warp, deadline, resolve)
+}
+
+/// Read-only HTTPS egress originating from Ubuntu, with proxy credentials sent
+/// only over stdin to curl; no user/pass appears in child process arguments.
+#[cfg(windows)]
+pub fn https_wsl(
+    gateway: Ipv4Addr,
+    auth: (&str, &str),
+    vm: Ipv4Addr,
+    warp: bool,
+    deadline: Instant,
+) -> Proof {
+    let mut command = Command::new("wsl.exe");
+    command.args(["-d", "Ubuntu", "--", "/usr/bin/curl", "-q"]);
+    https_child(
+        &mut command,
+        &format!("http://{gateway}:2081"),
+        Some(auth),
+        vm,
+        warp,
+        deadline,
+        None,
+    )
+}
+#[cfg(windows)]
+fn https_child(
+    command: &mut Command,
+    proxy: &str,
+    auth: Option<(&str, &str)>,
+    vm: Ipv4Addr,
+    warp: bool,
+    deadline: Instant,
+    resolve: Option<&str>,
+) -> Proof {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining < Duration::from_millis(400) {
         return Proof::new(Verdict::Unknown, "DEEP_DEADLINE_EXCEEDED");
@@ -92,8 +129,7 @@ pub fn https(
     } else {
         "https://api.ipify.org"
     };
-    // No -k/--insecure: public TLS verification is mandatory.
-    let mut command = Command::new("curl.exe");
+
     command
         .args([
             "--silent",
@@ -193,6 +229,11 @@ pub fn https(
     _: Instant,
     _: Option<&str>,
 ) -> Proof {
+    Proof::new(Verdict::Unknown, "WINDOWS_ONLY")
+}
+
+#[cfg(not(windows))]
+pub fn https_wsl(_: Ipv4Addr, _: (&str, &str), _: Ipv4Addr, _: bool, _: Instant) -> Proof {
     Proof::new(Verdict::Unknown, "WINDOWS_ONLY")
 }
 

@@ -60,7 +60,9 @@ pub fn batch(ids: &[&str], deep: bool) -> Vec<Diagnostic> {
         None
     };
     let line2 = if need_line2 {
-        config.map(|c| std::thread::spawn(move || line2_egress(c, deadline)))
+        config
+            .clone()
+            .map(|c| std::thread::spawn(move || line2_egress(c, deadline)))
     } else {
         None
     };
@@ -68,6 +70,27 @@ pub fn batch(ids: &[&str], deep: bool) -> Vec<Diagnostic> {
         .iter()
         .map(|id| inspect_with_task(id, deep, task.as_ref()))
         .collect();
+    // Guest-originating authenticated HTTPS is only attempted after the
+    // existing WSL boundary check proved selector ownership, binding and 407.
+    // No secrets in argv, logs or stored state; read runtime sing-box JSON.
+    if let Some(d) = results
+        .iter_mut()
+        .find(|d| d.resource_id == "windows/wsl-selector")
+        && d.reason_code == "WSL_AUTH_CHALLENGE_PASS_EGRESS_NOT_CHECKED"
+        && let Some(c) = &config
+    {
+        let proof = selected_wsl_egress(c, deadline);
+        d.health = proof_health(proof.verdict);
+        d.reason_code = if proof.verdict == egress::Verdict::Pass {
+            "WSL_AUTHENTICATED_HTTPS_EGRESS_CONFIRMED"
+        } else {
+            proof.reason
+        };
+        d.source = "wsl-ubuntu-curl-https-via-sing-box";
+        d.scope = "selected_wsl_authenticated_https_egress";
+        d.observed_at = now();
+        d.next_action = "internet diagnose windows/wsl-selector";
+    }
     let desktop_proof = desktop.map(|h| {
         h.join().unwrap_or(egress::Proof {
             verdict: egress::Verdict::Unknown,
@@ -163,6 +186,57 @@ fn selected_desktop_egress(config: serde_json::Value, deadline: Instant) -> egre
         None,
     )
 }
+/// The native installed sing-box config is already the runtime auth owner.
+/// Caller only executes after the independent WSL 407 challenge and host
+/// gateway binding check succeed; no duplicate credential store or Vault read.
+fn wsl_egress_input(
+    c: &serde_json::Value,
+) -> Result<(std::net::Ipv4Addr, std::net::Ipv4Addr, bool, &str, &str), &'static str> {
+    let vm = native_vm(c).ok_or("REMOTE_ENDPOINT_UNKNOWN")?;
+    let inbound = &c["inbounds"][1];
+    if inbound["tag"] != "wsl-in"
+        || inbound["type"] != "mixed"
+        || inbound["listen_port"].as_u64() != Some(2081)
+    {
+        return Err("WSL_NATIVE_INBOUND_INVALID");
+    }
+    let gateway: std::net::Ipv4Addr = inbound["listen"]
+        .as_str()
+        .ok_or("WSL_NATIVE_BINDING_MISSING")?
+        .parse()
+        .map_err(|_| "WSL_NATIVE_BINDING_INVALID")?;
+    if !gateway.is_private() || gateway.is_loopback() || gateway.is_unspecified() {
+        return Err("WSL_NATIVE_BINDING_INVALID");
+    }
+    let user = inbound["users"][0]["username"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or("WSL_RUNTIME_AUTH_UNAVAILABLE")?;
+    let password = inbound["users"][0]["password"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or("WSL_RUNTIME_AUTH_UNAVAILABLE")?;
+    let route = config::selected(c, Target::Wsl).map_err(|_| "WSL_ROUTE_UNKNOWN")?;
+    Ok((
+        gateway,
+        vm,
+        route.tag().starts_with("warp-"),
+        user,
+        password,
+    ))
+}
+fn selected_wsl_egress(c: &serde_json::Value, deadline: Instant) -> egress::Proof {
+    match wsl_egress_input(c) {
+        Ok((gateway, vm, warp, user, password)) => {
+            egress::https_wsl(gateway, (user, password), vm, warp, deadline)
+        }
+        Err(reason) => egress::Proof {
+            verdict: egress::Verdict::Unknown,
+            reason,
+        },
+    }
+}
+
 #[derive(Debug)]
 struct Line2Result {
     verdict: egress::Verdict,
@@ -588,6 +662,32 @@ pub fn all(deep: bool) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wsl_egress_input_enforces_binding_auth_and_route_without_secrets_in_output() {
+        let mut c = serde_json::json!({
+            "outbounds":[{"server":"64.176.74.102"},{"tag":"wsl-selector","default":"warp-auto"}],
+            "inbounds":[{},{"tag":"wsl-in","type":"mixed","listen":"172.26.16.1",
+                           "listen_port":2081,"users":[{"username":"demo","password":"test-only"}]}]
+        });
+        let p = wsl_egress_input(&c).unwrap();
+        assert_eq!(p.0.to_string(), "172.26.16.1");
+        assert_eq!(p.1.to_string(), "64.176.74.102");
+        assert!(p.2);
+        c["inbounds"][1]["listen"] = serde_json::json!("127.0.0.1");
+        assert_eq!(
+            wsl_egress_input(&c).unwrap_err(),
+            "WSL_NATIVE_BINDING_INVALID"
+        );
+        c["inbounds"][1]["listen"] = serde_json::json!("172.26.16.1");
+        c["inbounds"][1]["users"][0]["password"] = serde_json::json!("");
+        assert_eq!(
+            wsl_egress_input(&c).unwrap_err(),
+            "WSL_RUNTIME_AUTH_UNAVAILABLE"
+        );
+        c["inbounds"][1]["users"][0]["password"] = serde_json::json!("test-only");
+        c["outbounds"][1]["default"] = serde_json::json!("not-a-route");
+        assert_eq!(wsl_egress_input(&c).unwrap_err(), "WSL_ROUTE_UNKNOWN");
+    }
     #[test]
     fn read_only_unknown_remote() {
         let d = inspect("vultr/vm", true);
