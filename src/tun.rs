@@ -175,6 +175,23 @@ fn write_at(path: &Path, state: &Settings) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Validate a transported settings snapshot but never activate TUN during restore.
+/// The original desired TUN state remains in the exported backup for the operator.
+pub fn validate_backup(saved: &Settings) -> Result<(), &'static str> {
+    validate(saved)
+}
+
+pub fn restore_inactive_at(path: &Path, saved: &Settings) -> Result<Settings, &'static str> {
+    validate(saved)?;
+    let mut safe = saved.clone();
+    safe.managed_tun = false;
+    write_at(path, &safe)?;
+    if read_at(path)? != safe {
+        return Err("RESTORE_TUN_READBACK_FAILED");
+    }
+    Ok(safe)
+}
+
 #[derive(Clone, Copy)]
 pub enum Switch {
     ManagedTun,
