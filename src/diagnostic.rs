@@ -2,20 +2,22 @@
 use crate::{
     config, egress, lifecycle,
     model::{Diagnostic, Health, Target},
-    selector,
+    selector, tun,
 };
 use chrono::Utc;
 use std::{
     net::{SocketAddr, TcpStream},
     time::{Duration, Instant},
 };
-pub const IDS: [&str; 10] = [
+pub const IDS: [&str; 12] = [
     "internet",
     "windows",
     "windows/network",
     "windows/sing-box",
     "windows/desktop-selector",
     "windows/wsl-selector",
+    "windows/tun",
+    "windows/selected-apps",
     "vultr",
     "vultr/vm",
     "vultr/line1",
@@ -488,6 +490,7 @@ fn inspect_with_task(
         "windows/sing-box" => local_binary(task),
         "windows/desktop-selector" => local_selector(id, Target::Desktop, deep, task),
         "windows/wsl-selector" => local_selector(id, Target::Wsl, deep, task),
+        "windows/tun" | "windows/selected-apps" => tun::inspect(id),
         _ => node(
             id,
             "unknown",
