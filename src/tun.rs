@@ -252,16 +252,17 @@ pub fn change_application(add: bool, name: &str) -> Result<Value, &'static str> 
 }
 
 fn persist(path: &Path, old: &Settings, next: &Settings) -> Result<Value, &'static str> {
-    // No changes to native sing-box, its Task, DNS, firewall, selectors or Windows routing.
+    // Even NOOP must prove the native configuration has no TUN.
+    // This never mutates a live route, Task or proxy selector.
+    config::read(&config::installed())?;
     if old != next {
-        config::read(&config::installed())?;
         config::protect_private_directory(path.parent().ok_or("TUN_STATE_PATH_INVALID")?)?;
         write_at(path, next)?;
     }
     Ok(
         json!({"ok":true,"changed":old != next,"managed_tun":next.managed_tun,
         "selected_apps":next.selected_apps,"applications":next.applications,
-        "runtime":"TUN_OFF","scope":"desired_settings_only",
+        "native_config":"TUN_NOT_CONFIGURED","runtime_proof":"NOT_TESTED","scope":"desired_settings_only",
         "next_action":"internet inspect windows/tun"}),
     )
 }
@@ -409,6 +410,30 @@ mod tests {
         let s2 = list_change(&s, true, r"C:\Program Files\Mozilla Firefox\firefox.exe").unwrap();
         assert_eq!(s, s2);
     }
+
+    #[test]
+    fn saved_state_is_atomic_and_invalid_or_interrupted_data_is_not_assumed_off() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("internet-s4-{}-{suffix}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let file = dir.join("tun.json");
+        assert_eq!(read_at(&file).unwrap(), Settings::default());
+        let s = list_change(&Settings::default(), true, "firefox.exe").unwrap();
+        write_at(&file, &s).unwrap();
+        assert_eq!(read_at(&file).unwrap(), s);
+        let mut changed = s.clone();
+        changed.selected_apps = true;
+        write_at(&file, &changed).unwrap();
+        assert_eq!(read_at(&file).unwrap(), changed);
+        std::fs::write(&file, b"{bad json").unwrap();
+        assert_eq!(read_at(&file).unwrap_err(), "TUN_STATE_JSON_INVALID");
+        let marker = file.with_extension("incoming.json");
+        std::fs::write(&marker, b"partial").unwrap();
+        assert_eq!(read_at(&file).unwrap_err(), "TUN_STATE_INTERRUPTED");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn empty_last_entry_and_interrupted_state_fail_closed() {
         let s = list_change(&Settings::default(), true, "firefox.exe").unwrap();
