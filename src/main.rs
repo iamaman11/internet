@@ -343,5 +343,16 @@ mod exit_tests {
             diagnostic_exit(&[node(Health::Unknown, "NOT_CHECKED")], true, false),
             3
         );
+        assert_eq!(
+            diagnostic_exit(
+                &[node(
+                    Health::Unknown,
+                    "WSL_TRANSPORT_PASS_EGRESS_NOT_CHECKED"
+                )],
+                true,
+                false
+            ),
+            3
+        );
     }
 }

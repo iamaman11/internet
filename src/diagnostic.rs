@@ -280,7 +280,9 @@ fn local_selector(
                                 d.reason_code = "WSL_PROXY_UNREACHABLE";
                                 d.next_action = "internet inspect windows/wsl-selector";
                             } else {
-                                d.health = Health::Degraded;
+                                // TCP transport was observed; external egress was not.
+                                // Unknown is truthful, not a known service failure.
+                                d.health = Health::Unknown;
                                 d.reason_code = "WSL_TRANSPORT_PASS_EGRESS_NOT_CHECKED";
                                 d.source = "wsl-tcp-connect";
                                 d.scope = "wsl_transport_only";
