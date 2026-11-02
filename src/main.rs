@@ -350,7 +350,12 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         }
         Err(code) => {
             emit(
-                &json!({"ok":false,"reason_code":code,"next_action": "internet help"}),
+                &json!({"ok":false,"reason_code":code,
+                    "next_action": if code=="APP_TUN_OFF_ENABLE_EXPLICITLY" {
+                        "internet tun on (changes Windows routes; verify independent control)"
+                    } else if code=="APP_DIRECT_REQUIRES_SELECTED_APPS" {
+                        "internet selected-apps on (changes routing for other applications)"
+                    } else { "internet help" }}),
                 json_mode,
             );
             if code == "WINDOWS_ONLY"

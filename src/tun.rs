@@ -497,25 +497,46 @@ fn edge_path() -> Result<String, &'static str> {
     }
     Err("EDGE_EXECUTABLE_NOT_FOUND")
 }
-pub fn app_set_edge(vm: bool) -> Result<Value, &'static str> {
-    let exact = edge_path()?;
-    let old = read_at(&path())?;
-    if old.managed_tun && !old.selected_apps && !vm {
-        return Err("APP_DIRECT_REQUIRES_SELECTED_APPS");
+fn edge_transition(old: &Settings, vm: bool, exact: &str) -> Result<Settings, &'static str> {
+    validate(old)?;
+    // Starting a global TUN must remain a separate explicit action.
+    if vm && !old.managed_tun {
+        return Err("APP_TUN_OFF_ENABLE_EXPLICITLY");
+    }
+    if old.managed_tun && !old.selected_apps {
+        // Edge is already using VM with all other applications. Do not
+        // silently reroute those other applications to DIRECT.
+        return if vm {
+            Ok(old.clone())
+        } else {
+            Err("APP_DIRECT_REQUIRES_SELECTED_APPS")
+        };
     }
     let mut next = old.clone();
     next.applications
-        .retain(|a| a != "msedge.exe" && a != &exact);
+        .retain(|a| a != "msedge.exe" && a != exact);
     if vm {
-        next.applications.push(exact.clone());
+        next.applications.push(exact.to_owned());
         next.applications.sort();
-        next.selected_apps = true;
     }
     validate(&next)?;
+    Ok(next)
+}
+pub fn app_set_edge(vm: bool) -> Result<Value, &'static str> {
+    let exact = edge_path()?;
+    let old = read_at(&path())?;
+    let next = edge_transition(&old, vm, &exact)?;
     let mut result = persist(&path(), &old, &next)?;
     result["application"] = json!("edge");
     result["executable"] = json!(exact);
     result["desired_route"] = json!(if vm { "VM" } else { "DIRECT" });
+    result["scope"] = json!(if !next.managed_tun {
+        "TUN_OFF"
+    } else if !next.selected_apps {
+        "ALL_APPLICATIONS_VIA_VM"
+    } else {
+        "SELECTED_APPLICATIONS"
+    });
     Ok(result)
 }
 pub fn app_list() -> Result<Value, &'static str> {
@@ -939,6 +960,35 @@ mod tests {
         let mut other = c;
         other["route"]["rules"][2]["rule_set"] = json!(["foreign"]);
         assert!(!hot_native(&other));
+    }
+    #[test]
+    fn edge_route_does_not_start_tun_or_reroute_other_applications() {
+        let edge = r"c:\program files (x86)\microsoft\edge\application\msedge.exe";
+        let inactive = list_change(&Settings::default(), true, "firefox.exe").unwrap();
+        assert_eq!(
+            edge_transition(&inactive, true, edge),
+            Err("APP_TUN_OFF_ENABLE_EXPLICITLY")
+        );
+        assert_eq!(inactive.applications, ["firefox.exe"]);
+        let all_apps = toggle_state(&inactive, Switch::ManagedTun, true).unwrap();
+        assert_eq!(edge_transition(&all_apps, true, edge), Ok(all_apps.clone()));
+        assert_eq!(
+            edge_transition(&all_apps, false, edge),
+            Err("APP_DIRECT_REQUIRES_SELECTED_APPS")
+        );
+        let selected = toggle_state(&all_apps, Switch::SelectedApps, true).unwrap();
+        let added = edge_transition(&selected, true, edge).unwrap();
+        assert!(added.applications.contains(&"firefox.exe".to_owned()));
+        assert!(added.applications.contains(&edge.to_owned()));
+        assert!(!added.applications.contains(&"msedge.exe".to_owned()));
+        let removed = edge_transition(&added, false, edge).unwrap();
+        assert_eq!(removed.applications, ["firefox.exe"]);
+        let last = list_change(&Settings::default(), true, "msedge.exe").unwrap();
+        let last = toggle_state(&last, Switch::SelectedApps, true).unwrap();
+        let last = toggle_state(&last, Switch::ManagedTun, true).unwrap();
+        let cleared = edge_transition(&last, false, edge).unwrap();
+        assert!(cleared.applications.is_empty());
+        assert!(cleared.selected_apps && cleared.managed_tun);
     }
     #[test]
     fn saved_state_is_atomic_and_invalid_or_interrupted_data_is_not_assumed_off() {
