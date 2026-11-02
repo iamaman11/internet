@@ -230,7 +230,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
             "wsl route <same>","start","stop","restart","configure --stdin",
             "backup export <external-directory>","restore <external-directory>",
              "tun <status|on|off>","selected-apps <status|on|off|add EXE|remove EXE>"],
-             "note":"S4 TUN ON blocked until independent control is verified. Selected Apps list inert when TUN OFF; Windows kernel bypass unsupported"}),
+             "note":"S4 native TUN has control-IP exclusion; selected-apps bypass is DIRECT outbound, not kernel bypass"}),
         ),
         _ => Err("COMMAND_INVALID"),
     };
@@ -265,7 +265,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
 }
 fn menu() -> i32 {
     println!(
-        "INTERNET — Windows/WSL\n1 Status   2 Diagnose   3 Start   4 Stop   5 Desktop route   6 WSL route\n7 TUN status   8 Selected Apps status   9 Selected Apps ON/OFF   10 Add app   11 Remove app   0 Exit"
+        "INTERNET — Windows/WSL\n1 Status   2 Diagnose   3 Start   4 Stop   5 Desktop route   6 WSL route\n7 TUN status   8 Selected Apps status   9 Selected Apps ON/OFF   10 Add app   11 Remove app   12 TUN ON/OFF   0 Exit"
     );
     let mut line = String::new();
     if io::stdin().read_line(&mut line).is_err() {
@@ -283,6 +283,7 @@ fn menu() -> i32 {
         "9" => vec!["selected-apps".into()],
         "10" => vec!["selected-apps".into(), "add".into()],
         "11" => vec!["selected-apps".into(), "remove".into()],
+        "12" => vec!["tun".into()],
         "0" => return 0,
         _ => return 1,
     };
@@ -296,10 +297,10 @@ fn menu() -> i32 {
         }
         args.push(choice.trim().to_owned());
     }
-    if ["9", "10", "11"].contains(&line.trim()) {
+    if ["9", "10", "11", "12"].contains(&line.trim()) {
         println!(
             "{}",
-            if line.trim() == "9" {
+            if line.trim() == "9" || line.trim() == "12" {
                 "Selected Apps: on | off"
             } else {
                 "Executable name or absolute path:"

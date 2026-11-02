@@ -35,9 +35,23 @@ pub fn validate(c: &Value) -> Result<(), &'static str> {
         .pointer("/route/rules")
         .and_then(Value::as_array)
         .ok_or("CONFIG_ROUTE_RULES_MISSING")?;
-    if inbounds.len() != 2 || outbounds.len() != 8 || rules.len() != 2 {
+    let tun_enabled = inbounds.len() == 3;
+    if (inbounds.len() != 2 && !tun_enabled)
+        || outbounds.len() != if tun_enabled { 9 } else { 8 }
+        || rules.len()
+            != if tun_enabled {
+                if rules.get(2).and_then(|r| r.get("process_name")).is_some() {
+                    4
+                } else {
+                    3
+                }
+            } else {
+                2
+            }
+    {
         return Err("CONFIG_SCOPE_MISMATCH");
     }
+    crate::tun::validate_native(c, tun_enabled)?;
     for (target, port) in [(Target::Desktop, 2080), (Target::Wsl, 2081)] {
         let inbound = by_tag(inbounds, target.listener())?;
         let addr = inbound["listen"].as_str().ok_or("CONFIG_INBOUND_UNSAFE")?;
@@ -394,6 +408,54 @@ mod tests {
         assert_eq!(validate(&c), Err("CONFIG_ENDPOINT_INVALID"));
         c["outbounds"][0]["server"] = Value::String("".into());
         assert_eq!(validate(&c), Err("CONFIG_ENDPOINT_INVALID"));
+    }
+    #[test]
+    fn s4_native_tun_render_preserves_two_proxy_selectors_and_rejects_drift() {
+        use crate::tun::{Settings, Switch, list_change, render_native, toggle_state};
+        let initial = fixture();
+        let control: std::net::Ipv4Addr = "64.176.74.54".parse().unwrap();
+        let off = Settings::default();
+        assert_eq!(render_native(&initial, &off, &[]).unwrap(), initial);
+        let with_app = list_change(&off, true, "firefox.exe").unwrap();
+        let with_apps = toggle_state(&with_app, Switch::SelectedApps, true).unwrap();
+        let active = toggle_state(&with_apps, Switch::ManagedTun, true).unwrap();
+        let all_traffic = toggle_state(&off, Switch::ManagedTun, true).unwrap();
+        let all_native = render_native(&initial, &all_traffic, &[control]).unwrap();
+        assert_eq!(all_native["route"]["rules"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            all_native["route"]["rules"][2]["outbound"],
+            "desktop-selector"
+        );
+
+        assert_eq!(
+            render_native(&initial, &active, &[]).unwrap_err(),
+            "TUN_CONTROL_NOT_CONNECTED"
+        );
+        let tun = render_native(&initial, &active, &[control]).unwrap();
+        assert_eq!(tun["inbounds"].as_array().unwrap().len(), 3);
+        assert_eq!(tun["route"]["rules"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            tun["route"]["rules"][2]["process_name"],
+            serde_json::json!(["firefox.exe"])
+        );
+        assert_eq!(selected(&tun, Target::Desktop).unwrap(), Route::DirectAuto);
+        assert_eq!(selected(&tun, Target::Wsl).unwrap(), Route::DirectAuto);
+        let changed = with_selected(&tun, Target::Desktop, Route::WarpVless).unwrap();
+        assert_eq!(selected(&changed, Target::Wsl).unwrap(), Route::DirectAuto);
+        let restored = render_native(&tun, &off, &[]).unwrap();
+        assert_eq!(restored, initial);
+        let mut bad = tun.clone();
+        bad["inbounds"][2]
+            .as_object_mut()
+            .unwrap()
+            .remove("route_exclude_address");
+        assert_eq!(validate(&bad), Err("TUN_CONTROL_EXCLUSION_MISSING"));
+        let mut bad = tun.clone();
+        bad["route"]["rules"][3]["outbound"] = "desktop-selector".into();
+        assert_eq!(validate(&bad), Err("TUN_ROUTE_UNSAFE"));
+        let mut bad = tun.clone();
+        bad["outbounds"][8]["type"] = "selector".into();
+        assert_eq!(validate(&bad), Err("TUN_ROUTE_UNSAFE"));
     }
     #[test]
     fn no_unchecked_fallback_endpoints() {

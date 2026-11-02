@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use std::{
     fs,
     io::Write,
+    net::Ipv4Addr,
     path::{Path, PathBuf},
 };
 
@@ -180,6 +181,170 @@ pub enum Switch {
     SelectedApps,
 }
 
+pub fn validate_native(c: &Value, on: bool) -> Result<(), &'static str> {
+    let inb = c["inbounds"].as_array().ok_or("TUN_INBOUND_INVALID")?;
+    let out = c["outbounds"].as_array().ok_or("TUN_OUTBOUND_INVALID")?;
+    let rules = c
+        .pointer("/route/rules")
+        .and_then(Value::as_array)
+        .ok_or("TUN_RULE_INVALID")?;
+    if !on {
+        if c.pointer("/route/auto_detect_interface").is_some()
+            || inb.iter().any(|x| x["type"] == "tun")
+            || out.iter().any(|x| x["tag"] == "s4-native-direct")
+        {
+            return Err("TUN_UNOWNED_NATIVE_OBJECT");
+        }
+        return Ok(());
+    }
+    let t = &inb[2];
+    let mut shape = t.as_object().ok_or("TUN_INBOUND_UNSAFE")?.clone();
+    let addresses = shape
+        .remove("route_exclude_address")
+        .ok_or("TUN_CONTROL_EXCLUSION_MISSING")?;
+    if Value::Object(shape)
+        != json!({"type":"tun","tag":"windows-tun",
+        "interface_name":"internet-tun","address":["172.29.241.1/30"],
+        "mtu":1500,"dns_mode":"disabled","auto_route":true})
+    {
+        return Err("TUN_INBOUND_UNSAFE");
+    }
+    let addresses = addresses
+        .as_array()
+        .ok_or("TUN_CONTROL_EXCLUSION_INVALID")?;
+    if addresses.len() < 2 || addresses.len() > 9 {
+        return Err("TUN_CONTROL_EXCLUSION_INVALID");
+    }
+    let vm = c["outbounds"][0]["server"]
+        .as_str()
+        .ok_or("TUN_VM_UNAVAILABLE")?;
+    if !addresses.contains(&json!(format!("{vm}/32"))) {
+        return Err("TUN_VM_EXCLUSION_MISSING");
+    }
+    let mut uniq = std::collections::HashSet::new();
+    for value in addresses {
+        let ip: Ipv4Addr = value
+            .as_str()
+            .and_then(|s| s.strip_suffix("/32"))
+            .ok_or("TUN_CONTROL_EXCLUSION_INVALID")?
+            .parse()
+            .map_err(|_| "TUN_CONTROL_EXCLUSION_INVALID")?;
+        if ip.is_private()
+            || ip.is_loopback()
+            || ip.is_unspecified()
+            || ip.is_link_local()
+            || !uniq.insert(ip)
+        {
+            return Err("TUN_CONTROL_EXCLUSION_INVALID");
+        }
+    }
+    if c.pointer("/route/auto_detect_interface") != Some(&Value::Bool(true))
+        || out[8] != json!({"type":"direct","tag":"s4-native-direct"})
+    {
+        return Err("TUN_ROUTE_UNSAFE");
+    }
+    if rules.len() == 3 {
+        if rules[2] != json!({"inbound":["windows-tun"],"outbound":"desktop-selector"}) {
+            return Err("TUN_ROUTE_UNSAFE");
+        }
+    } else {
+        if rules[3] != json!({"inbound":["windows-tun"],"outbound":"s4-native-direct"})
+            || rules[2]["inbound"] != json!(["windows-tun"])
+            || rules[2]["outbound"] != "desktop-selector"
+            || rules[2].as_object().is_none_or(|o| o.len() != 3)
+        {
+            return Err("TUN_ROUTE_UNSAFE");
+        }
+        let names = rules[2]["process_name"]
+            .as_array()
+            .ok_or("TUN_PROCESS_RULE_INVALID")?;
+        if names.is_empty() || names.len() > 32 {
+            return Err("TUN_PROCESS_RULE_INVALID");
+        }
+        for v in names {
+            let name = v.as_str().ok_or("TUN_PROCESS_RULE_INVALID")?;
+            if application(name)? != name {
+                return Err("TUN_PROCESS_RULE_INVALID");
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn render_native(
+    original: &Value,
+    selected: &Settings,
+    control: &[Ipv4Addr],
+) -> Result<Value, &'static str> {
+    validate(selected)?;
+    config::validate(original)?;
+    let mut c = original.clone();
+    if c["inbounds"].as_array().is_some_and(|a| a.len() == 3) {
+        c["inbounds"].as_array_mut().unwrap().pop();
+        c["outbounds"].as_array_mut().unwrap().pop();
+        c.pointer_mut("/route/rules")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .truncate(2);
+        c["route"]
+            .as_object_mut()
+            .unwrap()
+            .remove("auto_detect_interface");
+    }
+    if !selected.managed_tun {
+        config::validate(&c)?;
+        return Ok(c);
+    }
+    if selected.selected_apps && selected.applications.iter().any(|v| v.contains('\\')) {
+        return Err("TUN_PROCESS_PATH_UNSUPPORTED");
+    }
+    if control.is_empty() || control.len() > 8 {
+        return Err("TUN_CONTROL_NOT_CONNECTED");
+    }
+    let vm: Ipv4Addr = c["outbounds"][0]["server"]
+        .as_str()
+        .ok_or("TUN_VM_UNAVAILABLE")?
+        .parse()
+        .map_err(|_| "TUN_VM_UNAVAILABLE")?;
+    let mut exclusions = vec![vm];
+    for ip in control {
+        if ip.is_private() || ip.is_loopback() || ip.is_unspecified() || ip.is_link_local() {
+            return Err("TUN_CONTROL_IP_UNSAFE");
+        }
+        if !exclusions.contains(ip) {
+            exclusions.push(*ip)
+        }
+    }
+    if exclusions.len() < 2 {
+        return Err("TUN_CONTROL_NOT_INDEPENDENT");
+    }
+    let cidrs: Vec<String> = exclusions.iter().map(|ip| format!("{ip}/32")).collect();
+    c["inbounds"].as_array_mut().unwrap().push(json!({
+        "type":"tun","tag":"windows-tun","interface_name":"internet-tun",
+        "address":["172.29.241.1/30"],"mtu":1500,
+        "dns_mode":"disabled","auto_route":true,"route_exclude_address":cidrs}));
+    c["outbounds"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type":"direct","tag":"s4-native-direct"}));
+    c["route"]["auto_detect_interface"] = Value::Bool(true);
+    let rules = c
+        .pointer_mut("/route/rules")
+        .unwrap()
+        .as_array_mut()
+        .unwrap();
+    if selected.selected_apps {
+        rules.push(json!({"inbound":["windows-tun"],
+            "process_name":selected.applications,"outbound":"desktop-selector"}));
+        rules.push(json!({"inbound":["windows-tun"],"outbound":"s4-native-direct"}));
+    } else {
+        rules.push(json!({"inbound":["windows-tun"],"outbound":"desktop-selector"}));
+    }
+    config::validate(&c)?;
+    Ok(c)
+}
+
 pub fn toggle_state(
     current: &Settings,
     switch: Switch,
@@ -188,17 +353,7 @@ pub fn toggle_state(
     validate(current)?;
     let mut next = current.clone();
     match switch {
-        Switch::ManagedTun if enable && current.selected_apps => {
-            return Err("S4_WINDOWS_KERNEL_BYPASS_UNSUPPORTED");
-        }
-        Switch::ManagedTun if enable => return Err("S4_INDEPENDENT_CONTROL_NOT_VERIFIED"),
-        Switch::ManagedTun if current.managed_tun => {
-            return Err("S4_ACTIVE_TUN_REQUIRES_NATIVE_RECOVERY");
-        }
-        Switch::ManagedTun => next.managed_tun = false,
-        Switch::SelectedApps if current.managed_tun => {
-            return Err("S4_ACTIVE_TUN_REQUIRES_NATIVE_RECOVERY");
-        }
+        Switch::ManagedTun => next.managed_tun = enable,
         Switch::SelectedApps => next.selected_apps = enable,
     }
     validate(&next)?;
@@ -207,9 +362,6 @@ pub fn toggle_state(
 
 pub fn list_change(current: &Settings, add: bool, name: &str) -> Result<Settings, &'static str> {
     validate(current)?;
-    if current.managed_tun {
-        return Err("S4_ACTIVE_TUN_REQUIRES_NATIVE_RECOVERY");
-    }
     let name = application(name)?;
     let mut next = current.clone();
     if add {
@@ -231,39 +383,175 @@ pub fn list_change(current: &Settings, add: bool, name: &str) -> Result<Settings
     Ok(next)
 }
 
+#[cfg(windows)]
+fn control_endpoints() -> Result<Vec<Ipv4Addr>, &'static str> {
+    let script = r#"$p=@(Get-CimInstance Win32_Process -Filter "Name='tunnel-client-runtime.exe'" | Where-Object {$_.ExecutablePath -like '*\WindowsAdminMCP\client\tunnel-client-runtime.exe'}); if($p.Count -ne 1){exit 5}; @(Get-NetTCPConnection -State Established -ErrorAction Stop | Where-Object {$_.OwningProcess -eq $p[0].ProcessId} | Select-Object -ExpandProperty RemoteAddress -Unique)"#;
+    let out = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .map_err(|_| "TUN_CONTROL_QUERY_FAILED")?;
+    if !out.status.success() {
+        return Err("TUN_CONTROL_NOT_CONNECTED");
+    }
+    let text = String::from_utf8(out.stdout).map_err(|_| "TUN_CONTROL_QUERY_FAILED")?;
+    let mut ips = Vec::new();
+    for line in text.lines() {
+        let ip: Ipv4Addr = line.trim().parse().map_err(|_| "TUN_CONTROL_IP_UNSAFE")?;
+        if ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() {
+            return Err("TUN_CONTROL_IP_UNSAFE");
+        }
+        if !ips.contains(&ip) {
+            ips.push(ip)
+        }
+    }
+    if ips.is_empty() || ips.len() > 8 {
+        return Err("TUN_CONTROL_NOT_CONNECTED");
+    }
+    Ok(ips)
+}
+#[cfg(not(windows))]
+fn control_endpoints() -> Result<Vec<Ipv4Addr>, &'static str> {
+    Err("WINDOWS_ONLY")
+}
+
+#[cfg(windows)]
+fn adapter_up() -> Result<bool, &'static str> {
+    let cmd = "(@(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object {$_.Name -eq 'internet-tun' -and $_.Status -eq 'Up'}).Count)";
+    let out = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", cmd])
+        .output()
+        .map_err(|_| "TUN_ADAPTER_READBACK_UNKNOWN")?;
+    if !out.status.success() {
+        return Err("TUN_ADAPTER_READBACK_UNKNOWN");
+    }
+    match String::from_utf8_lossy(&out.stdout).trim() {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err("TUN_ADAPTER_READBACK_UNKNOWN"),
+    }
+}
+#[cfg(not(windows))]
+fn adapter_up() -> Result<bool, &'static str> {
+    Err("WINDOWS_ONLY")
+}
+
+fn candidate_check(c: &Value) -> Result<(), &'static str> {
+    let file = config::installed().with_file_name("s4-native.check.json");
+    if file.exists() {
+        return Err("TUN_CHECK_CONFLICT");
+    }
+    let bytes = serde_json::to_vec(c).map_err(|_| "TUN_SERIALIZE_FAILED")?;
+    let outcome = (|| {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&file)
+            .map_err(|_| "TUN_CHECK_CONFLICT")?;
+        f.write_all(&bytes)
+            .and_then(|_| f.sync_all())
+            .map_err(|_| "TUN_CHECK_WRITE_FAILED")?;
+        drop(f);
+        crate::lifecycle::native_check(&file)
+    })();
+    let _ = fs::remove_file(file);
+    outcome
+}
+fn verify_native(enabled: bool) -> Result<(), &'static str> {
+    if !crate::lifecycle::is_running()? {
+        return Err("TUN_TASK_NOT_RUNNING");
+    }
+    crate::selector::runtime_selected(crate::model::Target::Desktop)?;
+    crate::selector::runtime_selected(crate::model::Target::Wsl)?;
+    if adapter_up()? != enabled {
+        return Err("TUN_ADAPTER_READBACK_MISMATCH");
+    }
+    Ok(())
+}
 pub fn command(switch: Switch, enable: bool) -> Result<Value, &'static str> {
     if !cfg!(windows) {
         return Err("WINDOWS_ONLY");
     }
-    let path = path();
-    let current = read_at(&path)?;
+    let current = read_at(&path())?;
     let next = toggle_state(&current, switch, enable)?;
-    persist(&path, &current, &next)
+    persist(&path(), &current, &next)
 }
-
 pub fn change_application(add: bool, name: &str) -> Result<Value, &'static str> {
     if !cfg!(windows) {
         return Err("WINDOWS_ONLY");
     }
-    let path = path();
-    let current = read_at(&path)?;
+    let current = read_at(&path())?;
     let next = list_change(&current, add, name)?;
-    persist(&path, &current, &next)
+    persist(&path(), &current, &next)
 }
-
 fn persist(path: &Path, old: &Settings, next: &Settings) -> Result<Value, &'static str> {
-    // Even NOOP must prove the native configuration has no TUN.
-    // This never mutates a live route, Task or proxy selector.
-    config::read(&config::installed())?;
-    if old != next {
+    let current = config::read(&config::installed())?;
+    let configured = current["inbounds"].as_array().is_some_and(|v| v.len() == 3);
+    if configured != old.managed_tun {
+        return Err("TUN_DESIRED_NATIVE_DRIFT");
+    }
+    if old == next {
+        return Ok(
+            json!({"ok":true,"changed":false,"managed_tun":old.managed_tun,
+            "selected_apps":old.selected_apps,"applications":old.applications,
+            "native_adapter_up":adapter_up()?,
+            "next_action":"internet tun status"}),
+        );
+    }
+    let needs_restart = old.managed_tun || next.managed_tun;
+    if !needs_restart {
         config::protect_private_directory(path.parent().ok_or("TUN_STATE_PATH_INVALID")?)?;
         write_at(path, next)?;
+    } else {
+        if !crate::lifecycle::is_running()? {
+            return Err("TUN_TASK_NOT_RUNNING");
+        }
+        let ips = if next.managed_tun {
+            control_endpoints()?
+        } else {
+            vec![]
+        };
+        let updated = render_native(&current, next, &ips)?;
+        candidate_check(&updated)?;
+        if updated != current {
+            if crate::lifecycle::stop().is_err() {
+                let _ = crate::lifecycle::start();
+                return Err("TUN_STOP_UNCONFIRMED");
+            }
+            let outcome = (|| {
+                config::write_checked(&config::installed(), &updated)?;
+                crate::lifecycle::start()?;
+                verify_native(next.managed_tun)
+            })();
+            if outcome.is_err() {
+                let rollback = config::write_checked(&config::installed(), &current)
+                    .and_then(|_| crate::lifecycle::restart())
+                    .and_then(|_| verify_native(old.managed_tun));
+                return Err(if rollback.is_ok() {
+                    "TUN_APPLY_ROLLED_BACK"
+                } else {
+                    "TUN_ROLLBACK_UNCONFIRMED"
+                });
+            }
+        } else {
+            verify_native(next.managed_tun)?;
+        }
+        if write_at(path, next).is_err() {
+            let rollback = config::write_checked(&config::installed(), &current)
+                .and_then(|_| crate::lifecycle::restart())
+                .and_then(|_| verify_native(old.managed_tun));
+            return Err(if rollback.is_ok() {
+                "TUN_STATE_WRITE_ROLLED_BACK"
+            } else {
+                "TUN_ROLLBACK_UNCONFIRMED"
+            });
+        }
     }
     Ok(
-        json!({"ok":true,"changed":old != next,"managed_tun":next.managed_tun,
+        json!({"ok":true,"changed":true,"managed_tun":next.managed_tun,
         "selected_apps":next.selected_apps,"applications":next.applications,
-        "native_config":"TUN_NOT_CONFIGURED","runtime_proof":"NOT_TESTED","scope":"desired_settings_only",
-        "next_action":"internet inspect windows/tun"}),
+        "runtime_confirmed":needs_restart,
+        "unselected_egress":"native_direct_not_kernel_bypass",
+        "next_action":"internet diagnose windows/tun"}),
     )
 }
 
@@ -272,15 +560,16 @@ pub fn status() -> Result<Value, &'static str> {
         return Err("WINDOWS_ONLY");
     }
     let s = read_at(&path())?;
-    let c = config::read(&config::installed())?;
-    let native_tun = c["inbounds"]
-        .as_array()
-        .is_some_and(|a| a.iter().any(|i| i["type"] == "tun"));
+    let native = config::read(&config::installed())?;
+    let configured = native["inbounds"].as_array().is_some_and(|a| a.len() == 3);
+    let up = adapter_up()?;
     Ok(
         json!({"managed_tun":s.managed_tun,"selected_apps":s.selected_apps,
-        "applications":s.applications,"native_tun_configured":native_tun,
-        "runtime_proof":"NOT_TESTED","windows_kernel_bypass":"UNSUPPORTED",
-        "control_independent":"NOT_TESTED"}),
+        "applications":s.applications,"native_tun_configured":configured,
+        "native_tun_up":up,"desired_native_match":s.managed_tun==configured,
+        "kernel_bypass_for_unselected":"UNSUPPORTED",
+        "unselected_egress":"native DIRECT when selected-apps on",
+        "physical_egress":"NOT_TESTED_BY_STATUS"}),
     )
 }
 
@@ -293,45 +582,38 @@ pub fn inspect(id: &str) -> Diagnostic {
     );
     d.parent = Some("windows/sing-box");
     d.dependencies = vec!["windows/sing-box"];
-    d.source = "config/tun.json and native sing-box.json";
-    d.scope = "configured_state_only_no_live_tun_proof";
+    d.source = "config/tun.json, native sing-box.json, Windows adapter readback";
+    d.scope = "desired_and_native_state_only";
     if !cfg!(windows) {
         return d;
     }
     match status() {
-        Ok(s) => {
+        Ok(v) => {
             d.observed_at = Some(chrono::Utc::now().to_rfc3339());
-            d.expected = Some("No managed TUN while control independence is unverified".into());
-            d.actual = Some(if id == "windows/tun" {
-                format!(
-                    "desired={};native_configured={}",
-                    s["managed_tun"], s["native_tun_configured"]
-                )
+            d.expected = Some("desired/native config and actual adapter agree".into());
+            d.actual = Some(format!(
+                "tun={};configured={};up={};selected_apps={};count={}",
+                v["managed_tun"],
+                v["native_tun_configured"],
+                v["native_tun_up"],
+                v["selected_apps"],
+                v["applications"].as_array().map_or(0, Vec::len)
+            ));
+            let good = v["desired_native_match"] == true && v["managed_tun"] == v["native_tun_up"];
+            d.health = if good {
+                Health::Healthy
             } else {
-                format!(
-                    "selected_apps={};count={};tun={}",
-                    s["selected_apps"],
-                    s["applications"].as_array().map_or(0, Vec::len),
-                    s["managed_tun"]
-                )
-            });
-            if s["managed_tun"] == true || s["native_tun_configured"] == true {
-                d.health = Health::Unsupported;
-                d.reason_code = "S4_NATIVE_TUN_UNVERIFIED";
+                Health::Failed
+            };
+            d.reason_code = if good {
+                "TUN_NATIVE_STATE_CONFIRMED"
             } else {
-                d.health = Health::Healthy;
-                d.reason_code = if id == "windows/tun" {
-                    "TUN_OFF_NATIVE_CONFIG_CONFIRMED"
-                } else if s["selected_apps"] == true {
-                    "SELECTED_APPS_SAVED_INERT"
-                } else {
-                    "SELECTED_APPS_OFF"
-                };
-            }
-            d.next_action = if id == "windows/tun" {
+                "TUN_NATIVE_STATE_MISMATCH"
+            };
+            d.next_action = if good {
                 "internet tun status"
             } else {
-                "internet selected-apps status"
+                "internet diagnose windows/tun"
             };
         }
         Err(code) => {
@@ -339,14 +621,13 @@ pub fn inspect(id: &str) -> Diagnostic {
             d.reason_code = match code {
                 "TUN_STATE_INTERRUPTED" => "TUN_STATE_INTERRUPTED",
                 "TUN_STATE_JSON_INVALID" | "TUN_STATE_SCHEMA_INVALID" => "TUN_STATE_INVALID",
-                _ => "TUN_NATIVE_READBACK_UNKNOWN",
+                _ => "TUN_READBACK_UNKNOWN",
             };
             d.next_action = "internet tun status";
         }
     }
     d
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,20 +639,22 @@ mod tests {
         assert!(s.selected_apps);
         assert!(!s.managed_tun);
         assert_eq!(s.applications, ["firefox.exe"]);
-        assert_eq!(
-            toggle_state(&s, Switch::ManagedTun, true).unwrap_err(),
-            "S4_WINDOWS_KERNEL_BYPASS_UNSUPPORTED"
+        assert!(
+            toggle_state(&s, Switch::ManagedTun, true)
+                .unwrap()
+                .managed_tun
         );
         let s = toggle_state(&s, Switch::SelectedApps, false).unwrap();
         assert!(!s.selected_apps);
         assert_eq!(s.applications, ["firefox.exe"]);
     }
     #[test]
-    fn tun_never_activates_without_verified_independent_control() {
+    fn toggles_only_change_desired_state_without_native_mutation() {
         let s = Settings::default();
-        assert_eq!(
-            toggle_state(&s, Switch::ManagedTun, true).unwrap_err(),
-            "S4_INDEPENDENT_CONTROL_NOT_VERIFIED"
+        assert!(
+            toggle_state(&s, Switch::ManagedTun, true)
+                .unwrap()
+                .managed_tun
         );
         assert_eq!(toggle_state(&s, Switch::ManagedTun, false).unwrap(), s);
     }
