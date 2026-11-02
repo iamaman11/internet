@@ -9,7 +9,7 @@ $root = 'C:\internet'
 $marker = Join-Path $root '.internet-owned'
 $owner = 'iamaman11/internet:s2-windows-x64'
 $files = @('internet.exe','sing-box.exe','windows/menu.ps1',
-           'windows/configure_from_vault.py','vm/tools/render_runtime.py')
+           'windows/configure_from_vault.py','windows/proxies.py','vm/tools/render_runtime.py')
 $stage = Join-Path $env:TEMP ('internet-install-' + [guid]::NewGuid().ToString('N'))
 $backups = @()
 $written = @()

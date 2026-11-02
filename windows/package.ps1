@@ -12,6 +12,7 @@ $files = @(
     @{path='sing-box.exe';source=$SingBoxExe},
     @{path='windows/menu.ps1';source='windows/menu.ps1'},
     @{path='windows/configure_from_vault.py';source='windows/configure_from_vault.py'},
+    @{path='windows/proxies.py';source='windows/proxies.py'},
     @{path='vm/tools/render_runtime.py';source='vm/tools/render_runtime.py'}
 )
 try {

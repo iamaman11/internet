@@ -3,6 +3,7 @@ pub mod diagnostic;
 pub mod egress;
 pub mod lifecycle;
 pub mod model;
+pub mod proxies;
 pub mod selector;
 pub mod tun;
 pub mod wsl;
