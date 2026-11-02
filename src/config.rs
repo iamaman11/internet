@@ -113,6 +113,22 @@ pub fn validate(c: &Value) -> Result<(), &'static str> {
             return Err("CONFIG_AUTO_FALLBACK_FORBIDDEN");
         }
     }
+    let first_server = by_tag(outbounds, "direct-vless")?["server"]
+        .as_str()
+        .ok_or("CONFIG_ENDPOINT_INVALID")?;
+    let endpoint: std::net::Ipv4Addr = first_server
+        .parse()
+        .map_err(|_| "CONFIG_ENDPOINT_INVALID")?;
+    if endpoint.is_private()
+        || endpoint.is_loopback()
+        || endpoint.is_link_local()
+        || endpoint.is_unspecified()
+        || endpoint.is_multicast()
+        || endpoint.is_broadcast()
+        || endpoint.octets()[0] == 0
+    {
+        return Err("CONFIG_ENDPOINT_INVALID");
+    }
     for (tag, kind, port) in [
         ("direct-vless", "vless", 443),
         ("warp-vless", "vless", 5443),
@@ -121,7 +137,7 @@ pub fn validate(c: &Value) -> Result<(), &'static str> {
     ] {
         let v = by_tag(outbounds, tag)?;
         if v["type"] != kind
-            || v["server"] != "64.176.74.102"
+            || v["server"].as_str() != Some(first_server)
             || v["server_port"].as_u64() != Some(port)
             || v["tls"]["enabled"] != true
         {
@@ -360,6 +376,24 @@ mod tests {
             .unwrap()
             .push(serde_json::json!({"type":"tun"}));
         assert_eq!(validate(&c), Err("CONFIG_SCOPE_MISMATCH"));
+    }
+    #[test]
+    fn single_endpoint_rejects_mismatch_and_invalid_ip() {
+        let mut c = fixture();
+        for o in c["outbounds"].as_array_mut().unwrap() {
+            if o["server"].is_string() {
+                o["server"] = Value::String("8.8.8.8".into());
+            }
+        }
+        assert_eq!(validate(&c), Ok(()));
+        c["outbounds"][1]["server"] = Value::String("1.1.1.1".into());
+        assert_eq!(validate(&c), Err("CONFIG_ENDPOINT_MISMATCH"));
+        c["outbounds"][1]["server"] = Value::String("127.0.0.1".into());
+        assert_eq!(validate(&c), Err("CONFIG_ENDPOINT_MISMATCH"));
+        c["outbounds"][0]["server"] = Value::String("127.0.0.1".into());
+        assert_eq!(validate(&c), Err("CONFIG_ENDPOINT_INVALID"));
+        c["outbounds"][0]["server"] = Value::String("".into());
+        assert_eq!(validate(&c), Err("CONFIG_ENDPOINT_INVALID"));
     }
     #[test]
     fn no_unchecked_fallback_endpoints() {

@@ -25,6 +25,13 @@ CLI is necessary on the target Windows.
 With WSL Ubuntu and the **full** portable Secret Vault folder (including
 `vault/` and `keys/`) restored to its existing path, use the vault's
 `doctor`/`status`/`inspect`/`verify` before binding credentials.
+Before the Vault-backed configuration step, obtain the **current IPv4** by
+authenticated Vultr readback of the exact INTERNET VM UUID and supply it as
+INTERNET_VM_IPV4 to the trusted child. A missing/private/invalid IPv4 fails
+closed; no previous VM address is embedded in the renderer or Rust validator.
+The four native outbound endpoints must match one public IPv4. This input is
+configuration (not a secret), not a new discovery service or state store.
+
 The trusted child `windows/configure_from_vault.py` consumes the existing
 `internet.vm.dataplane-auth` record through `secret-vault run-file`;
 it hands native configuration via stdin directly to `internet.exe configure

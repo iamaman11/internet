@@ -3,6 +3,15 @@
 use crate::{TASK, config};
 use std::path::Path;
 
+#[cfg(any(windows, test))]
+fn task_state_running(state: i32) -> Result<bool, &'static str> {
+    match state {
+        4 => Ok(true),
+        1..=3 => Ok(false),
+        _ => Err("TASK_STATE_UNKNOWN"),
+    }
+}
+
 pub fn task_owned(receipt: &str) -> bool {
     receipt.contains(&format!("<Command>{}\\sing-box.exe</Command>", crate::ROOT))
         && (receipt.contains(&format!(
@@ -42,23 +51,47 @@ mod native {
         if task_receipt()?.is_none() {
             return Ok(false);
         }
-        let o = command(
-            "powershell.exe",
-            &[
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "$t=Get-ScheduledTask -TaskName 'INTERNET-SingBox' -ErrorAction Stop; [string]$t.State",
-            ],
-        )?;
-        if !o.status.success() {
-            return Err("TASK_READBACK_FAILED");
+        // The scheduler's COM State is an invariant integer enum, not
+        // localized PowerShell output. The existing XML receipt verifies owner.
+        use windows::{
+            Win32::System::{
+                Com::{
+                    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+                    CoUninitialize,
+                },
+                TaskScheduler::ITaskService,
+                Variant::VARIANT,
+            },
+            core::{BSTR, GUID},
+        };
+        struct ComSession;
+        impl Drop for ComSession {
+            fn drop(&mut self) {
+                unsafe { CoUninitialize() };
+            }
         }
-        match String::from_utf8_lossy(&o.stdout).trim() {
-            "Running" => Ok(true),
-            "Ready" | "Disabled" | "Queued" => Ok(false),
-            _ => Err("TASK_STATE_UNKNOWN"),
+        let _session = {
+            // SAFETY: this CLI initializes COM on the calling thread and
+            // balances each successful initialization on that same thread.
+            unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
+                .ok()
+                .map_err(|_| "TASK_COM_INITIALIZE_FAILED")?;
+            ComSession
+        };
+        // CLSID of the native Windows Task Scheduler service.
+        let clsid = GUID::from_u128(0x0f87369f_a4e5_4cfc_bd3e_73e6154572dd);
+        let service: ITaskService = unsafe { CoCreateInstance(&clsid, None, CLSCTX_INPROC_SERVER) }
+            .map_err(|_| "TASK_COM_CONNECT_FAILED")?;
+        let empty = VARIANT::default();
+        let task = unsafe {
+            service
+                .Connect(&empty, &empty, &empty, &empty)
+                .and_then(|_| service.GetFolder(&BSTR::from("\\")))
+                .and_then(|folder| folder.GetTask(&BSTR::from(TASK)))
         }
+        .map_err(|_| "TASK_READBACK_FAILED")?;
+        let state = unsafe { task.State() }.map_err(|_| "TASK_READBACK_FAILED")?;
+        super::task_state_running(state.0)
     }
     pub fn native_check(path: &Path) -> Result<(), &'static str> {
         let o = Command::new(config::binary())
@@ -228,5 +261,15 @@ mod tests {
     fn no_fallback_to_unowned_scheduler() {
         assert!(!task_owned(""));
         assert!(!task_owned("<Task><Actions><Exec /></Actions></Task>"));
+    }
+    #[test]
+    fn task_state_is_numeric_and_fail_closed() {
+        assert_eq!(task_state_running(4), Ok(true));
+        for v in [1, 2, 3] {
+            assert_eq!(task_state_running(v), Ok(false));
+        }
+        for v in [-1, 0, 5] {
+            assert_eq!(task_state_running(v), Err("TASK_STATE_UNKNOWN"));
+        }
     }
 }

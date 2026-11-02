@@ -29,19 +29,28 @@ fn emit(v: &Value, json_mode: bool) {
         println!("{}", v);
     }
 }
-fn diagnostic_output(ids: &[&str], deep: bool, json_mode: bool, check_scope: bool) -> i32 {
-    let result = diagnostic::batch(ids, deep);
-    let failed = result
-        .iter()
-        .any(|d| matches!(d.health, Health::Failed | Health::Unsupported));
-    let unknown = check_scope
-        && result
-            .iter()
-            .any(|d| matches!(d.health, Health::Unknown | Health::Stale));
-    emit(
-        &serde_json::to_value(result).expect("diagnostic serialization"),
-        json_mode,
-    );
+const LOCAL_STATUS: [&str; 3] = [
+    "windows/sing-box",
+    "windows/desktop-selector",
+    "windows/wsl-selector",
+];
+
+fn diagnostic_exit(
+    result: &[internet::model::Diagnostic],
+    check_scope: bool,
+    local_status: bool,
+) -> i32 {
+    let failed = result.iter().any(|d| {
+        matches!(d.health, Health::Failed | Health::Unsupported)
+            || ((check_scope || local_status) && d.health == Health::Degraded)
+    });
+    let unknown = result.iter().any(|d| {
+        matches!(d.health, Health::Unknown | Health::Stale)
+            && (check_scope
+                || (local_status
+                    && d.reason_code != "NOT_CHECKED"
+                    && d.reason_code != "WSL_CHANNEL_NOT_TESTED"))
+    });
     if failed {
         2
     } else if unknown {
@@ -49,6 +58,18 @@ fn diagnostic_output(ids: &[&str], deep: bool, json_mode: bool, check_scope: boo
     } else {
         0
     }
+}
+
+fn diagnostic_output(ids: &[&str], deep: bool, json_mode: bool, check_scope: bool) -> i32 {
+    let result = diagnostic::batch(ids, deep);
+    // Local status must report a known degradation as nonzero while explicitly
+    // unprobed remote nodes do not affect its fast-scope readiness.
+    let code = diagnostic_exit(&result, check_scope, !deep && ids == LOCAL_STATUS);
+    emit(
+        &serde_json::to_value(result).expect("diagnostic serialization"),
+        json_mode,
+    );
+    code
 }
 fn apply_route(target: Target, raw: &str) -> Result<Value, &'static str> {
     let route: Route = raw.parse().map_err(|_| "ROUTE_UNSUPPORTED")?;
@@ -265,4 +286,62 @@ fn main() {
         execute(&args, args.iter().any(|s| s == "--json"))
     };
     std::process::exit(code);
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use super::*;
+    use internet::model::{Diagnostic, Health};
+    fn node(health: Health, reason: &'static str) -> Diagnostic {
+        let mut d = Diagnostic::unknown("windows/sing-box", "process", "test", "internet start");
+        d.health = health;
+        d.reason_code = reason;
+        d
+    }
+    #[test]
+    fn stopped_local_task_never_exits_zero() {
+        assert_eq!(
+            diagnostic_exit(&[node(Health::Degraded, "TASK_STOPPED")], false, true),
+            2
+        );
+        assert_eq!(
+            diagnostic_exit(&[node(Health::Failed, "BINARY_MISSING")], false, true),
+            2
+        );
+        assert_eq!(
+            diagnostic_exit(&[node(Health::Healthy, "TASK_RUNNING")], false, true),
+            0
+        );
+    }
+    #[test]
+    fn unknown_checked_not_equivalent_to_explicitly_unchecked() {
+        assert_eq!(
+            diagnostic_exit(
+                &[node(Health::Unknown, "TASK_READBACK_UNKNOWN")],
+                false,
+                true
+            ),
+            3
+        );
+        assert_eq!(
+            diagnostic_exit(&[node(Health::Unknown, "NOT_CHECKED")], false, false),
+            0
+        );
+        assert_eq!(
+            diagnostic_exit(
+                &[node(Health::Unknown, "WSL_CHANNEL_NOT_TESTED")],
+                false,
+                true
+            ),
+            0
+        );
+        assert_eq!(
+            diagnostic_exit(&[node(Health::Degraded, "TASK_STOPPED")], false, false),
+            0
+        );
+        assert_eq!(
+            diagnostic_exit(&[node(Health::Unknown, "NOT_CHECKED")], true, false),
+            3
+        );
+    }
 }

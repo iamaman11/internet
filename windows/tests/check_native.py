@@ -24,7 +24,7 @@ def image_ref():
 
 
 def main():
-    config = build(generate())
+    config = build(generate(), "64.176.74.102")
     with tempfile.TemporaryDirectory(prefix="internet-s2-native-") as directory:
         path = Path(directory) / "config.json"
         path.write_text(json.dumps(config))
