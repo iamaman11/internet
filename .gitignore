@@ -1,0 +1,7 @@
+/target/
+/.vscode/
+/.idea/
+/*.zip
+/desktop-runtime/
+/windows/config/
+/windows/state/
