@@ -58,6 +58,11 @@ try {
     & python (Join-Path $PSScriptRoot 'check_hot_rules.py')
     if ($LASTEXITCODE -ne 0) { throw 'U3_NATIVE_HOT_RELOAD_CI_FAILED' }
 
+    # Generic app-name and full-path operations on disposable Windows,
+    # with TUN OFF: zero production network changes.
+    & python (Join-Path $PSScriptRoot 'check_generic_app.py')
+    if ($LASTEXITCODE -ne 0) { throw 'U3_GENERIC_APP_CI_FAILED' }
+
     # The manifest is updated to reflect a defective candidate executable.
     # It passes hash checks; the CLI self-check must fail and roll back the
     # previous working EXE, without destroying its configuration.
