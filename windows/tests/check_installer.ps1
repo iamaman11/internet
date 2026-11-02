@@ -49,6 +49,10 @@ try {
     }
     'FRESH_INSTALL_AND_NOOP=PASS'
 
+    # Real stopped-restore test only on disposable CI Windows with fake auth.
+    & python (Join-Path $PSScriptRoot 'check_restore.py')
+    if ($LASTEXITCODE -ne 0) { throw 'U2_STOPPED_RESTORE_CI_FAILED' }
+
     # The manifest is updated to reflect a defective candidate executable.
     # It passes hash checks; the CLI self-check must fail and roll back the
     # previous working EXE, without destroying its configuration.
