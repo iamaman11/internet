@@ -9,7 +9,7 @@ $root = 'C:\internet'
 $marker = Join-Path $root '.internet-owned'
 $owner = 'iamaman11/internet:s2-windows-x64'
 $files = @('internet.exe','sing-box.exe','windows/menu.ps1',
-           'windows/configure_from_vault.py','vm/tools/render_runtime.py')
+           'windows/configure_from_vault.py','windows/proxies.py','vm/tools/render_runtime.py')
 $stage = Join-Path $env:TEMP ('internet-install-' + [guid]::NewGuid().ToString('N'))
 $backups = @()
 $written = @()
@@ -195,5 +195,15 @@ finally {
             }
         }
     }
-    if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+    if (Test-Path -LiteralPath $stage) {
+        try {
+            Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction Stop
+        } catch {
+            if (-not $success) { throw }
+            # Windows can keep the previous binary open while an older
+            # interactive menu is still running. The new installed files
+            # are already validated; cleanup is a deferred non-secret task.
+            Write-Warning 'INSTALL_TEMP_CLEANUP_DEFERRED_OLD_EXE_IN_USE'
+        }
+    }
 }

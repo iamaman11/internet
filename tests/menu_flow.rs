@@ -20,7 +20,7 @@ fn invalid_choice_does_not_exit_and_zero_exits_without_network_mutation() {
     let output = child.wait_with_output().expect("menu ended");
     assert!(output.status.success(), "{:?}", output.status);
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert_eq!(stdout.matches("1 Status").count(), 2);
+    assert_eq!(stdout.matches("1. Windows").count(), 2);
     assert!(stdout.contains("Unknown choice"));
 }
 
@@ -37,7 +37,7 @@ fn end_of_input_exits_without_repeating_forever() {
     assert_eq!(
         String::from_utf8(output.stdout)
             .unwrap()
-            .matches("1 Status")
+            .matches("1. Windows")
             .count(),
         1
     );

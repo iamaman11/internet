@@ -1,8 +1,8 @@
 //! INTERNET is a short-lived CLI. All mutations go through one operation layer.
 use internet::{
     config, diagnostic, lifecycle,
-    model::{Health, Route, Target},
-    selector, tun,
+    model::{Health, ROUTES, Route, Target},
+    proxies, selector, tun,
 };
 use serde_json::{Value, json};
 use std::{
@@ -215,6 +215,42 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         ("selected-apps", ["selected-apps", "remove", name]) => {
             tun::change_application(false, name)
         }
+        ("proxies", ["proxies", "list"]) => proxies::list(),
+        ("proxies", ["proxies", "test"]) => {
+            return match proxies::test() {
+                Ok(v) => {
+                    if json_mode {
+                        emit(&v, true);
+                    } else {
+                        print_proxy_tests(&v);
+                    }
+                    if v["ok"] == true { 0 } else { 2 }
+                }
+                Err(code) => {
+                    emit(&json!({"ok":false,"reason_code":code}), json_mode);
+                    3
+                }
+            };
+        }
+        ("proxies", ["proxies", "credentials"]) => {
+            if json_mode {
+                emit(
+                    &json!({"ok":false,"reason_code":"PROXY_CREDENTIALS_LOCAL_TERMINAL_ONLY"}),
+                    true,
+                );
+                return 4; // Never expose credentials on a machine-readable surface.
+            }
+            return match proxies::reveal() {
+                Ok(v) => {
+                    emit(&v, false);
+                    0
+                }
+                Err(code) => {
+                    emit(&json!({"ok":false,"reason_code":code}), false);
+                    4
+                }
+            };
+        }
         ("start", ["start"]) => lifecycle::start()
             .map(|_| json!({"ok":true,"owner":"Windows Task Scheduler","observed":"running"})),
         ("stop", ["stop"]) => lifecycle::stop()
@@ -229,14 +265,25 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
             "route <direct-auto|direct-hysteria2|direct-vless|warp-auto|warp-hysteria2|warp-vless>",
             "wsl route <same>","start","stop","restart","configure --stdin",
             "backup export <external-directory>","restore <external-directory>",
-             "tun <status|on|off>","selected-apps <status|on|off|add EXE|remove EXE>"],
+             "tun <status|on|off>","selected-apps <status|on|off|add EXE|remove EXE>",
+            "proxies <list|test|credentials>"],
              "note":"S4 native TUN has control-IP exclusion; selected-apps bypass is DIRECT outbound, not kernel bypass"}),
         ),
         _ => Err("COMMAND_INVALID"),
     };
     match effect {
         Ok(v) => {
-            emit(&v, json_mode);
+            if command == "proxies" && !json_mode {
+                print_proxy_list(&v);
+            } else if !json_mode
+                && (command == "tun" || command == "selected-apps")
+                && a.len() == 2
+                && a[1] == "status"
+            {
+                print_app_state(&v);
+            } else {
+                emit(&v, json_mode);
+            }
             0
         }
         Err(code) => {
@@ -263,65 +310,210 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         }
     }
 }
-fn menu() -> i32 {
-    // The menu is only an interactive caller of the same typed CLI operations.
-    // No network state lives here; closing the menu never stops sing-box.
-    loop {
-        println!(
-            "\nINTERNET — Windows/WSL\n1 Status   2 Diagnose   3 Start   4 Stop   5 Desktop route   6 WSL route\n7 TUN status   8 Selected Apps status   9 Selected Apps ON/OFF   10 Add app   11 Remove app   12 TUN ON/OFF   0 Exit"
-        );
-        print!("Choice: ");
-        let _ = io::stdout().flush();
-        let mut line = String::new();
-        match io::stdin().read_line(&mut line) {
-            Ok(0) => return 0,
-            Ok(_) => {}
-            Err(_) => return 1,
+fn print_app_state(v: &Value) {
+    let on = |key| match v[key].as_bool() {
+        Some(true) => "ON",
+        Some(false) => "OFF",
+        None => "UNKNOWN",
+    };
+    println!("Managed TUN:   {}", on("managed_tun"));
+    println!("Selected Apps: {}", on("selected_apps"));
+    if v["managed_tun"] == false {
+        println!("Application rules are SAVED but INACTIVE until TUN is ON.");
+    }
+    println!("Applications:");
+    if let Some(items) = v["applications"].as_array() {
+        if items.is_empty() {
+            println!("  (none)");
         }
-        let option = line.trim();
-        let mut args: Vec<String> = match option {
-            "1" => vec!["status".into()],
-            "2" => vec!["diagnose".into()],
-            "3" => vec!["start".into()],
-            "4" => vec!["stop".into()],
-            "5" => vec!["route".into()],
-            "6" => vec!["wsl".into(), "route".into()],
-            "7" => vec!["tun".into(), "status".into()],
-            "8" => vec!["selected-apps".into(), "status".into()],
-            "9" => vec!["selected-apps".into()],
-            "10" => vec!["selected-apps".into(), "add".into()],
-            "11" => vec!["selected-apps".into(), "remove".into()],
-            "12" => vec!["tun".into()],
+        for (i, item) in items.iter().enumerate() {
+            println!("  {}. {}", i + 1, item.as_str().unwrap_or("?"));
+        }
+    }
+}
+fn print_proxy_list(v: &Value) {
+    println!("MODE      PROTOCOL  ADDRESS                         PORT");
+    if let Some(a) = v["lines"].as_array() {
+        for l in a {
+            println!(
+                "{:<9} {:<9} {:<31} {}",
+                l["mode"].as_str().unwrap_or("-"),
+                l["protocol"].as_str().unwrap_or("-"),
+                l["address"].as_str().unwrap_or("-"),
+                l["port"]
+            );
+        }
+    }
+    println!("Credentials: Local Secret Vault (one login/password for all six).");
+    println!("For HTTPS always use the DNS name shown, not the IP address.");
+}
+fn print_proxy_tests(v: &Value) {
+    println!("PROXY      PROTOCOL PORT RESULT    IP                TIME   REASON");
+    if let Some(a) = v["results"].as_array() {
+        for x in a {
+            println!(
+                "{:<10} {:<8} {:<4} {:<9} {:<17} {:>5}ms {}",
+                x["mode"].as_str().unwrap_or("-"),
+                x["protocol"].as_str().unwrap_or("-"),
+                x["port"],
+                x["status"].as_str().unwrap_or("-"),
+                x["exit_ip"].as_str().unwrap_or("-"),
+                x["duration_ms"],
+                x["reason_code"].as_str().unwrap_or("-")
+            );
+        }
+    }
+    println!(
+        "PASS {}/{}; WARP is a different observed egress IP, not provider-identity proof.",
+        v["pass"], v["total"]
+    );
+}
+fn read_choice(prompt: &str) -> Option<String> {
+    print!("{prompt}");
+    let _ = io::stdout().flush();
+    let mut line = String::new();
+    match io::stdin().read_line(&mut line) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => Some(line.trim().to_owned()),
+    }
+}
+fn menu_status() {
+    let running = match lifecycle::is_running() {
+        Ok(true) => "RUNNING",
+        Ok(false) => "STOPPED",
+        Err(_) => "UNKNOWN",
+    };
+    let win = selector::runtime_selected(Target::Desktop)
+        .map(|r| r.tag().to_owned())
+        .unwrap_or_else(|_| "UNKNOWN".into());
+    let wsl = selector::runtime_selected(Target::Wsl)
+        .map(|r| r.tag().to_owned())
+        .unwrap_or_else(|_| "UNKNOWN".into());
+    let state = tun::status().ok();
+    let tun_on = state
+        .as_ref()
+        .and_then(|s| s["managed_tun"].as_bool())
+        .map(|v| if v { "ON" } else { "OFF" })
+        .unwrap_or("UNKNOWN");
+    let selected = state
+        .as_ref()
+        .and_then(|s| s["selected_apps"].as_bool())
+        .map(|v| if v { "ON" } else { "OFF" })
+        .unwrap_or("UNKNOWN");
+    let count = state
+        .as_ref()
+        .and_then(|s| s["applications"].as_array())
+        .map(|a| a.len().to_string())
+        .unwrap_or_else(|| "?".into());
+    let vm = proxies::endpoint()
+        .map(|(ip, _)| ip)
+        .unwrap_or_else(|_| "?".into());
+    println!("\n============ INTERNET ============");
+    println!("  sing-box:     {running}");
+    println!("  Windows:      {win}");
+    println!("  WSL:          {wsl}");
+    println!("  Managed TUN:  {tun_on}");
+    println!("  Selected:     {selected} ({count} apps)");
+    println!("  VM target:    {vm} (NOT_CHECKED)");
+}
+fn menu_route(target: Target) -> Option<Vec<String>> {
+    println!("\nChoose route (0 = back):");
+    for (i, route) in ROUTES.iter().enumerate() {
+        println!("  {}. {}", i + 1, route);
+    }
+    let value = read_choice("Route number: ")?;
+    let index = match value.as_str() {
+        "0" => return Some(vec![]),
+        n => match n.parse::<usize>().ok().filter(|n| (1..=6).contains(n)) {
+            Some(i) => i,
+            None => {
+                println!("Invalid route number.");
+                return Some(vec![]);
+            }
+        },
+    };
+    let mut args = if matches!(target, Target::Wsl) {
+        vec!["wsl".to_owned(), "route".to_owned()]
+    } else {
+        vec!["route".to_owned()]
+    };
+    args.push(ROUTES[index - 1].to_owned());
+    Some(args)
+}
+fn menu() -> i32 {
+    loop {
+        menu_status();
+        println!("\n  1. Windows — route");
+        println!("  2. WSL     — route");
+        println!("  3. Start / stop sing-box");
+        println!("  4. Selected applications — show");
+        println!("  5. Add application");
+        println!("  6. Remove application");
+        println!("  7. Selected Apps — ON/OFF");
+        println!("  8. Managed TUN   — ON/OFF");
+        println!("  9. Six proxies — addresses / ports");
+        println!(" 10. Proxy login / password (local only)");
+        println!(" 11. Test six proxies (real HTTPS egress)");
+        println!(" 12. Status");
+        println!(" 13. Diagnose");
+        println!("  0. Exit");
+        let Some(choice) = read_choice("\nChoice: ") else {
+            return 0;
+        };
+        let args = match choice.as_str() {
             "0" => return 0,
+            "1" => menu_route(Target::Desktop),
+            "2" => menu_route(Target::Wsl),
+            "3" => {
+                println!("1. Start  2. Stop  3. Restart  0. Back");
+                read_choice("Action: ").map(|v| match v.as_str() {
+                    "1" => vec!["start".into()],
+                    "2" => vec!["stop".into()],
+                    "3" => vec!["restart".into()],
+                    "0" => vec![],
+                    _ => vec!["invalid".into()],
+                })
+            }
+            "4" => Some(vec!["selected-apps".into(), "status".into()]),
+            "5" | "6" => read_choice("Executable name (.exe): ").map(|name| {
+                vec![
+                    "selected-apps".into(),
+                    if choice == "5" { "add" } else { "remove" }.into(),
+                    name,
+                ]
+            }),
+            "7" | "8" => read_choice("on / off (0 = back): ").map(|v| {
+                if v == "0" {
+                    vec![]
+                } else {
+                    vec![
+                        if choice == "7" {
+                            "selected-apps"
+                        } else {
+                            "tun"
+                        }
+                        .into(),
+                        v,
+                    ]
+                }
+            }),
+            "9" => Some(vec!["proxies".into(), "list".into()]),
+            "10" => Some(vec!["proxies".into(), "credentials".into()]),
+            "11" => Some(vec!["proxies".into(), "test".into()]),
+            "12" => Some(vec!["status".into()]),
+            "13" => Some(vec!["diagnose".into()]),
             _ => {
-                println!("Unknown choice. Use 0 to exit.");
+                println!("Unknown choice.");
                 continue;
             }
         };
-        if option == "5" || option == "6" {
-            println!(
-                "Route: direct-auto | direct-hysteria2 | direct-vless | warp-auto | warp-hysteria2 | warp-vless"
-            );
-        } else if option == "9" {
-            println!("Selected Apps: on | off");
-        } else if option == "12" {
-            println!("Managed TUN: on | off");
-        } else if option == "10" || option == "11" {
-            println!("Executable name or absolute path:");
-        }
-        if ["5", "6", "9", "10", "11", "12"].contains(&option) {
-            print!("Value: ");
-            let _ = io::stdout().flush();
-            let mut choice = String::new();
-            match io::stdin().read_line(&mut choice) {
-                Ok(0) => return 0,
-                Ok(_) => args.push(choice.trim().to_owned()),
-                Err(_) => return 1,
-            }
+        let Some(args) = args else { return 0 };
+        if args.is_empty() {
+            continue;
         }
         let code = execute(&args, false);
         if code != 0 {
-            println!("Operation exit={code}; network state is not assumed changed.");
+            println!("Operation exit={code}; no success assumed.");
         }
     }
 }
