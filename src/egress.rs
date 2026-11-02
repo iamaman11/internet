@@ -53,8 +53,10 @@ pub fn verify_body(body: &str, vm: Ipv4Addr, warp: bool) -> Proof {
     if !warp_on {
         return Proof::new(Verdict::Failed, "WARP_TRACE_NOT_ON");
     }
-    match observed.and_then(|s| s.parse::<Ipv4Addr>().ok()) {
-        Some(ip) if ip != vm => Proof::new(Verdict::Pass, "WARP_TRACE_AND_EGRESS_CONFIRMED"),
+    match observed.and_then(|s| s.parse::<std::net::IpAddr>().ok()) {
+        Some(ip) if ip != std::net::IpAddr::V4(vm) => {
+            Proof::new(Verdict::Pass, "WARP_TRACE_AND_EGRESS_CONFIRMED")
+        }
         Some(_) => Proof::new(Verdict::Failed, "WARP_DIRECT_EGRESS_LEAK"),
         None => Proof::new(Verdict::Unknown, "WARP_IP_NOT_VERIFIED"),
     }
@@ -225,6 +227,10 @@ mod tests {
         assert_eq!(
             verify_body("ip=104.28.1.10\nwarp=off\n", vm(), true).reason,
             "WARP_TRACE_NOT_ON"
+        );
+        assert_eq!(
+            verify_body("ip=2a09:bac1:5b80:40::49:134\nwarp=on\n", vm(), true).verdict,
+            Verdict::Pass
         );
         assert_eq!(
             verify_body("warp=on\n", vm(), true).verdict,
