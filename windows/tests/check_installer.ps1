@@ -21,6 +21,9 @@ try {
         if($_.Exception.Message -notmatch 'PACKAGE_(SHA256|SIZE)_MISMATCH') {throw}
     }
     if(-not $failed -or (Test-Path -LiteralPath $root)){throw 'INVALID_INSTALL_DID_NOT_NOOP'}
+    if(Get-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\' -ErrorAction SilentlyContinue){
+        throw 'INVALID_INSTALL_CREATED_TASK'
+    }
     'INVALID_INSTALL_NOOP=PASS'
 
     & ./windows/install.ps1 -PackagePath $PackagePath | Out-Null
@@ -29,6 +32,15 @@ try {
        (Test-Path -LiteralPath (Join-Path $root 'config/sing-box.json'))){
         throw 'CLEAN_INSTALL_STATE_INVALID'
     }
+    $task=Get-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\' -ErrorAction Stop
+    $details=[xml](Export-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\')
+    if($task.State -eq 'Running' -or
+       @($task.Triggers | Where-Object { $null -ne $_ }).Count -ne 0 -or
+       $task.Actions.Execute -cne 'C:\internet\sing-box.exe' -or
+       $details.Task.Principals.Principal.UserId -cne 'S-1-5-18'){
+        throw 'INSTALL_TASK_SCOPE_INVALID'
+    }
+    'OWNED_NATIVE_TASK_READY=PASS'
     $baseline=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
     $again=@(& ./windows/install.ps1 -PackagePath $PackagePath)
     if($again -notcontains 'INSTALL_NOOP=PASS'){throw 'REINSTALL_NOT_NOOP'}
@@ -64,12 +76,21 @@ try {
     if($LASTEXITCODE -ne 0){throw 'RECOVERED_CLI_NOT_EXECUTABLE'}
     'FAILED_UPDATE_RECOVERY=PASS'
 
-    if(@(Get-ScheduledTask -TaskName INTERNET-SingBox -ErrorAction SilentlyContinue).Count -ne 0){
-        throw 'INSTALL_CREATED_UNEXPECTED_TASK'
-    }
-    'FIRST_INSTALL_NO_NETWORK_OWNER=PASS'
+    $task=Get-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\' -ErrorAction Stop
+    if($task.State -eq 'Running'){throw 'INSTALL_STARTED_DATAPLANE'}
+    'FIRST_INSTALL_NO_NETWORK_PROCESS=PASS'
 }
 finally {
+    $task=Get-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\' -ErrorAction SilentlyContinue
+    if($task){
+        $xml=[xml](Export-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\')
+        if($task.Actions.Execute -cne 'C:\internet\sing-box.exe' -or
+           $xml.Task.Principals.Principal.UserId -cne 'S-1-5-18' -or
+           @($task.Triggers | Where-Object { $null -ne $_ }).Count -ne 0){
+            throw 'TEST_CLEANUP_TASK_OWNER_CONFLICT'
+        }
+        Unregister-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\' -Confirm:$false -ErrorAction Stop
+    }
     if((Test-Path -LiteralPath (Join-Path $root '.internet-owned')) -and
        (Get-Content -LiteralPath (Join-Path $root '.internet-owned') -Raw).Trim() -ceq 'iamaman11/internet:s2-windows-x64'){
         Remove-Item -LiteralPath $root -Recurse -Force

@@ -4,13 +4,15 @@ This is part of the existing S2 task in issue #16; no separate deployment plan.
 
 The only supported installation root is `C:\internet`. Windows sing-box runs
 under a single on-demand Task Scheduler task, `INTERNET-SingBox`. The Rust
-`internet.exe` is short-lived; it does not supervise the dataplane.
+`internet.exe` is short-lived; it does not supervise the dataplane. Windows bootstrap
+registers the native task exactly once with SYSTEM identity and no triggers. The
+normal `internet start` only starts that pre-existing verified task: it never
+creates persistence, services or scheduler entries.
 
 The candidate workflow emits `internet-windows-x64.zip` plus
 `install.ps1`. The installer verifies every packaged file against
 `manifest.json`, preserves `config/` and `state/`, refuses a foreign
-installation root, never changes WARP, firewall, DNS or routes, and does not
-start the service automatically. The first command is
+installation root, never changes WARP, firewall, DNS or routes, and registers the on-demand task without starting it automatically. The first command is
 `C:\internet\internet.exe status --json`. Without restored Vault configuration,
 `NOT_CONFIGURED` is correct, **not** a functioning network.
 

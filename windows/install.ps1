@@ -15,6 +15,27 @@ $backups = @()
 $written = @()
 $createdRoot = $false
 $success = $false
+$createdTask = $false
+$taskName = 'INTERNET-SingBox'
+function Test-InternetOwnedTask {
+    $task = Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction SilentlyContinue
+    if ($null -eq $task) { return $false }
+    $actions = @($task.Actions | Where-Object { $null -ne $_ })
+    $triggers = @($task.Triggers | Where-Object { $null -ne $_ })
+    $xml = [xml](Export-ScheduledTask -TaskName $taskName -TaskPath '\')
+    $expected = Join-Path $root 'sing-box.exe'
+    $arguments = 'run -c "C:\internet\config\sing-box.json"'
+    if ($actions.Count -ne 1 -or $triggers.Count -ne 0 -or
+        $actions[0].Execute -cne $expected -or
+        $actions[0].Arguments -cne $arguments -or
+        $actions[0].WorkingDirectory -cne $root -or
+        $xml.Task.Principals.Principal.UserId -cne 'S-1-5-18' -or
+        $xml.Task.Principals.Principal.RunLevel -cne 'HighestAvailable' -or
+        $task.Description -cne 'INTERNET owned sing-box (manual start)') {
+        throw 'TASK_OWNER_CONFLICT'
+    }
+    return $true
+}
 try {
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or
         [Environment]::Is64BitOperatingSystem -ne $true) {
@@ -78,7 +99,8 @@ try {
         }
         $changed += $name
     }
-    if ($changed.Count -eq 0 -and (Test-Path -LiteralPath $marker)) {
+    $taskOwned = Test-InternetOwnedTask
+    if ($changed.Count -eq 0 -and (Test-Path -LiteralPath $marker) -and $taskOwned) {
         Write-Output 'INSTALL_NOOP=PASS'
         $success = $true
         return
@@ -112,6 +134,17 @@ try {
     }
     & (Join-Path $root 'internet.exe') help --json | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'INSTALLED_CLI_SELF_CHECK_FAILED' }
+    # The existing Windows Task Scheduler is the sole persistent lifecycle owner.
+    # Registration happens once at installation, never during a CLI start command.
+    # There are no triggers: installation cannot start or reroute network traffic.
+    if (-not $taskOwned) {
+        $action = New-ScheduledTaskAction -Execute (Join-Path $root 'sing-box.exe') -Argument 'run -c "C:\internet\config\sing-box.json"' -WorkingDirectory $root
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        Register-ScheduledTask -TaskName $taskName -TaskPath '\' -Action $action -Principal $principal -Settings $settings -Description 'INTERNET owned sing-box (manual start)' -ErrorAction Stop | Out-Null
+        $createdTask = $true
+        if (-not (Test-InternetOwnedTask)) { throw 'TASK_INSTALL_READBACK_FAILED' }
+    }
     Set-Content -LiteralPath $marker -Value $owner -NoNewline
     Write-Output 'INSTALL_FILES=PASS'
     Write-Output 'INSTALL_NETWORK_MUTATION=NONE'
@@ -120,6 +153,12 @@ try {
 }
 finally {
     if (-not $success) {
+        if ($createdTask) {
+            # Roll back only the task registered by this exact attempt.
+            if (Test-InternetOwnedTask) {
+                Unregister-ScheduledTask -TaskName $taskName -TaskPath '\' -Confirm:$false -ErrorAction Stop
+            }
+        }
         foreach ($path in $written) {
             if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
         }

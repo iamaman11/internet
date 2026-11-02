@@ -3,19 +3,6 @@
 use crate::{TASK, config};
 use std::path::Path;
 
-pub fn xml() -> String {
-    // Fixed, canonical paths only: never install into legacy sing-box directories.
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>INTERNET owned sing-box (manual start)</Description></RegistrationInfo>
-  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><LogonType>ServiceAccount</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
-  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>false</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>
-  <Actions Context="Author"><Exec><Command>{root}\sing-box.exe</Command><Arguments>run -c "{root}\config\sing-box.json"</Arguments><WorkingDirectory>{root}</WorkingDirectory></Exec></Actions>
-</Task>"#,
-        root = crate::ROOT
-    )
-}
 pub fn task_owned(receipt: &str) -> bool {
     receipt.contains(&format!("<Command>{}\\sing-box.exe</Command>", crate::ROOT))
         && (receipt.contains(&format!(
@@ -105,26 +92,10 @@ mod native {
     }
     fn ensure_task() -> Result<(), &'static str> {
         if task_receipt()?.is_some() {
-            return Ok(());
+            Ok(())
+        } else {
+            Err("TASK_NOT_INSTALLED")
         }
-        let task_file = Path::new(crate::ROOT).join("state").join("task.xml");
-        fs::create_dir_all(task_file.parent().ok_or("TASK_PATH_INVALID")?)
-            .map_err(|_| "TASK_XML_WRITE_FAILED")?;
-        // Task Scheduler's XML import accepts UTF-16 LE with BOM.
-        let mut bytes = vec![0xff, 0xfe];
-        for unit in xml().encode_utf16() {
-            bytes.extend_from_slice(&unit.to_le_bytes());
-        }
-        fs::write(&task_file, bytes).map_err(|_| "TASK_XML_WRITE_FAILED")?;
-        let file = task_file.to_str().ok_or("TASK_PATH_INVALID")?;
-        let o = command("schtasks.exe", &["/Create", "/TN", TASK, "/XML", file])?;
-        if !o.status.success() {
-            return Err("TASK_CREATE_FAILED");
-        }
-        if task_receipt()?.is_none() {
-            return Err("TASK_CREATE_UNVERIFIED");
-        }
-        Ok(())
     }
     pub fn start() -> Result<(), &'static str> {
         let path = config::installed();
@@ -236,9 +207,16 @@ pub fn restart() -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn owned() -> String {
+        format!(
+            r#"<Task><Principals><Principal><UserId>S-1-5-18</UserId></Principal></Principals><Actions><Exec><Command>{}\sing-box.exe</Command><Arguments>run -c &quot;{}\config\sing-box.json&quot;</Arguments></Exec></Actions></Task>"#,
+            crate::ROOT,
+            crate::ROOT
+        )
+    }
     #[test]
-    fn owns_only_one_exact_native_task() {
-        let receipt = xml().replace('"', "&quot;");
+    fn only_exact_system_task_is_owned() {
+        let receipt = owned();
         assert!(task_owned(&receipt));
         assert!(!task_owned(
             &receipt.replace("C:\\internet", "C:\\sing-box")
@@ -247,10 +225,8 @@ mod tests {
         assert!(!task_owned(&(receipt.clone() + "<Exec>foreign</Exec>")));
     }
     #[test]
-    fn manual_only_no_startup_trigger() {
-        let task = xml();
-        assert!(!task.contains("<Triggers>"));
-        assert!(task.contains("<AllowStartOnDemand>true</AllowStartOnDemand>"));
-        assert!(task.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
+    fn no_fallback_to_unowned_scheduler() {
+        assert!(!task_owned(""));
+        assert!(!task_owned("<Task><Actions><Exec /></Actions></Task>"));
     }
 }
