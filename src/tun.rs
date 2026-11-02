@@ -486,10 +486,13 @@ pub fn change_application(add: bool, name: &str) -> Result<Value, &'static str> 
 fn persist(path: &Path, old: &Settings, next: &Settings) -> Result<Value, &'static str> {
     let current = config::read(&config::installed())?;
     let configured = current["inbounds"].as_array().is_some_and(|v| v.len() == 3);
-    if configured != old.managed_tun {
+    // A crash after native apply but before state persistence must not trap
+    // Windows in a TUN that "tun off" refuses to remove.
+    let recovering = configured != old.managed_tun;
+    if recovering && next.managed_tun {
         return Err("TUN_DESIRED_NATIVE_DRIFT");
     }
-    if old == next {
+    if old == next && !recovering {
         return Ok(
             json!({"ok":true,"changed":false,"managed_tun":old.managed_tun,
             "selected_apps":old.selected_apps,"applications":old.applications,
@@ -497,7 +500,7 @@ fn persist(path: &Path, old: &Settings, next: &Settings) -> Result<Value, &'stat
             "next_action":"internet tun status"}),
         );
     }
-    let needs_restart = old.managed_tun || next.managed_tun;
+    let needs_restart = configured || old.managed_tun || next.managed_tun;
     if !needs_restart {
         config::protect_private_directory(path.parent().ok_or("TUN_STATE_PATH_INVALID")?)?;
         write_at(path, next)?;
@@ -525,7 +528,7 @@ fn persist(path: &Path, old: &Settings, next: &Settings) -> Result<Value, &'stat
             if outcome.is_err() {
                 let rollback = config::write_checked(&config::installed(), &current)
                     .and_then(|_| crate::lifecycle::restart())
-                    .and_then(|_| verify_native(old.managed_tun));
+                    .and_then(|_| verify_native(configured));
                 return Err(if rollback.is_ok() {
                     "TUN_APPLY_ROLLED_BACK"
                 } else {
@@ -538,7 +541,7 @@ fn persist(path: &Path, old: &Settings, next: &Settings) -> Result<Value, &'stat
         if write_at(path, next).is_err() {
             let rollback = config::write_checked(&config::installed(), &current)
                 .and_then(|_| crate::lifecycle::restart())
-                .and_then(|_| verify_native(old.managed_tun));
+                .and_then(|_| verify_native(configured));
             return Err(if rollback.is_ok() {
                 "TUN_STATE_WRITE_ROLLED_BACK"
             } else {
@@ -550,6 +553,7 @@ fn persist(path: &Path, old: &Settings, next: &Settings) -> Result<Value, &'stat
         json!({"ok":true,"changed":true,"managed_tun":next.managed_tun,
         "selected_apps":next.selected_apps,"applications":next.applications,
         "runtime_confirmed":needs_restart,
+        "recovered_from_interrupted_apply":recovering,
         "unselected_egress":"native_direct_not_kernel_bypass",
         "next_action":"internet diagnose windows/tun"}),
     )
