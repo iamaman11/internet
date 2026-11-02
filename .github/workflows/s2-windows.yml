@@ -1,6 +1,7 @@
 name: S2 Windows candidate
 
-# One final run per completed S2 slice, never deploy from CI.
+# Compile an immutable candidate from exact PR head. Publishing a GitHub
+# pre-release only delivers test binaries; it never deploys or touches Windows.
 on:
   workflow_dispatch:
   pull_request:
@@ -20,6 +21,8 @@ jobs:
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -43,6 +46,8 @@ jobs:
     needs: linux-contract
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Rust stable MSVC
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -102,3 +107,51 @@ jobs:
           path: release-candidate/
           retention-days: 7
           if-no-files-found: error
+
+  candidate-release:
+    # Only this repository's explicitly scoped S2 PR may publish a test candidate.
+    # No deployment, secrets beyond the built-in short-lived GITHUB_TOKEN, or VM access.
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/s2-windows-cli-bootstrap' }}
+    needs: [linux-contract, windows-package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: internet-s2-windows-candidate
+          path: candidate
+      - name: Publish immutable S2 test pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f candidate/internet-windows-x64.zip
+          test -f candidate/install.ps1
+          test "${#SOURCE_SHA}" -eq 40
+          tag="v0.2.0-rc-${SOURCE_SHA:0:12}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "RELEASE_TAG_ALREADY_EXISTS_NO_OVERWRITE"
+            exit 1
+          fi
+          package_sha=$(sha256sum candidate/internet-windows-x64.zip | cut -d' ' -f1)
+          cat > /tmp/internet-release-notes.txt <<EOF
+          S2 Windows test candidate, NOT production accepted.
+          Source commit: $SOURCE_SHA
+          CI run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          Package SHA256: $package_sha
+          GitHub Issues #7/#8/#16 remain canonical requirements and evidence.
+          No Windows deployment, no VM changes. Do not promote before PHYSICAL_PASS.
+          EOF
+          gh release create "$tag" \
+            candidate/internet-windows-x64.zip \
+            candidate/install.ps1 \
+            --title "INTERNET S2 test candidate ${SOURCE_SHA:0:12}" \
+            --notes-file /tmp/internet-release-notes.txt \
+            --target "$SOURCE_SHA" --prerelease
+          gh release view "$tag" --json tagName,isPrerelease,assets \
+            --jq '{tagName,isPrerelease,assets:[.assets[]|{name,size}]}'
