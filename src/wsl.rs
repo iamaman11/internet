@@ -134,21 +134,44 @@ pub fn firewall_allow(_: &Network) -> Result<(), &'static str> {
     Err("WINDOWS_ONLY")
 }
 
+/// The only accepted positive readback is an HTTP 407 challenge from inside WSL.
+/// A bare listening socket or unknown protocol reply is not a proof.
+pub fn classify_auth_reply(raw: &str) -> Result<(), &'static str> {
+    match raw.trim() {
+        "AUTH_REQUIRED" => Ok(()),
+        "AUTH_BYPASS" => Err("WSL_PROXY_AUTH_BYPASS"),
+        "SOCKET_FAILED" => Err("WSL_TO_WINDOWS_PROXY_UNREACHABLE"),
+        _ => Err("WSL_PROXY_AUTH_UNVERIFIED"),
+    }
+}
+
 #[cfg(windows)]
 pub fn probe(network: &Network) -> Result<(), &'static str> {
     use std::process::Command;
+    // Test the real HTTP proxy boundary from the WSL guest, not just an open
+    // TCP socket. No credentials or egress configuration are read or changed.
     let source = format!(
-        r#"import socket; s=socket.socket(); s.settimeout(1.5); s.connect(('{}',2081)); s.close()"#,
+        r#"import socket
+try:
+ s=socket.create_connection(('{}',2081),timeout=1.5)
+ s.settimeout(1.5)
+ s.sendall(b'CONNECT api.ipify.org:443 HTTP/1.1\r\nHost: api.ipify.org:443\r\n\r\n')
+ response=s.recv(256).split(b'\r\n',1)[0]
+ print('AUTH_REQUIRED' if response.startswith(b'HTTP/1.1 407 ') else ('AUTH_BYPASS' if response.startswith(b'HTTP/1.1 200 ') else 'AUTH_UNKNOWN'))
+ s.close()
+except (OSError,TimeoutError):
+ print('SOCKET_FAILED')
+"#,
         network.gateway
     );
     let mut native = Command::new("wsl.exe");
     native.args(["-d", "Ubuntu", "--", "/usr/bin/python3", "-c", &source]);
     let out = read_only_command(native)?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err("WSL_TO_WINDOWS_PROXY_UNREACHABLE")
+    if !out.status.success() {
+        return Err("WSL_TO_WINDOWS_PROXY_UNREACHABLE");
     }
+    let reply = std::str::from_utf8(&out.stdout).map_err(|_| "WSL_AUTH_REPLY_INVALID")?;
+    classify_auth_reply(reply)
 }
 #[cfg(not(windows))]
 pub fn probe(_: &Network) -> Result<(), &'static str> {
@@ -158,6 +181,24 @@ pub fn probe(_: &Network) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wsl_http_auth_challenge_is_required() {
+        assert!(classify_auth_reply("AUTH_REQUIRED\n").is_ok());
+        assert_eq!(
+            classify_auth_reply("AUTH_BYPASS"),
+            Err("WSL_PROXY_AUTH_BYPASS")
+        );
+        assert_eq!(
+            classify_auth_reply("SOCKET_FAILED"),
+            Err("WSL_TO_WINDOWS_PROXY_UNREACHABLE")
+        );
+        for response in ["", "AUTH_UNKNOWN", "200", "AUTH_REQUIRED\nINJECTED"] {
+            assert_eq!(
+                classify_auth_reply(response),
+                Err("WSL_PROXY_AUTH_UNVERIFIED")
+            );
+        }
+    }
     #[test]
     fn exact_private_wsl_scope() {
         assert_eq!(

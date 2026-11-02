@@ -526,17 +526,32 @@ fn local_selector(
                                 d.health = Health::Failed;
                                 d.reason_code = "WSL_BINDING_STALE";
                                 d.next_action = "internet restart";
-                            } else if crate::wsl::probe(&n).is_err() {
-                                d.health = Health::Failed;
-                                d.reason_code = "WSL_PROXY_UNREACHABLE";
-                                d.next_action = "internet inspect windows/wsl-selector";
                             } else {
-                                // TCP transport was observed; external egress was not.
-                                // Unknown is truthful, not a known service failure.
-                                d.health = Health::Unknown;
-                                d.reason_code = "WSL_TRANSPORT_PASS_EGRESS_NOT_CHECKED";
-                                d.source = "wsl-tcp-connect";
-                                d.scope = "wsl_transport_only";
+                                match crate::wsl::probe(&n) {
+                                    Ok(()) => {
+                                        // HTTP 407 from inside the guest proves
+                                        // protocol reachability and auth enforcement,
+                                        // NOT an authenticated external egress.
+                                        d.health = Health::Unknown;
+                                        d.reason_code =
+                                            "WSL_AUTH_CHALLENGE_PASS_EGRESS_NOT_CHECKED";
+                                        d.source = "wsl-http-connect-negative";
+                                        d.scope = "wsl_authenticated_egress_not_checked";
+                                    }
+                                    Err("WSL_PROXY_AUTH_BYPASS") => {
+                                        d.health = Health::Failed;
+                                        d.reason_code = "WSL_PROXY_AUTH_BYPASS";
+                                    }
+                                    Err("WSL_PROXY_AUTH_UNVERIFIED" | "WSL_AUTH_REPLY_INVALID") => {
+                                        d.health = Health::Unknown;
+                                        d.reason_code = "WSL_AUTH_CHALLENGE_UNVERIFIED";
+                                    }
+                                    Err(_) => {
+                                        d.health = Health::Failed;
+                                        d.reason_code = "WSL_PROXY_UNREACHABLE";
+                                        d.next_action = "internet inspect windows/wsl-selector";
+                                    }
+                                }
                             }
                         }
                         Ok(None) => {
