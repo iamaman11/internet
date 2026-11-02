@@ -1,5 +1,6 @@
 pub mod config;
 pub mod diagnostic;
+pub mod egress;
 pub mod lifecycle;
 pub mod model;
 pub mod selector;

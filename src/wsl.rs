@@ -21,14 +21,46 @@ pub fn validate_ips(guest: &str, gateway: &str) -> Result<Network, &'static str>
     Ok(Network { guest, gateway })
 }
 #[cfg(windows)]
+fn read_only_command(
+    mut command: std::process::Command,
+) -> Result<std::process::Output, &'static str> {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().map_err(|_| "WSL_READBACK_UNAVAILABLE")?;
+    let until = Instant::now() + Duration::from_millis(2200);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                // Process already exited; collect exit status and bounded output.
+                return child.wait_with_output().map_err(|_| "WSL_READBACK_FAILED");
+            }
+            Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("WSL_READBACK_TIMEOUT");
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("WSL_READBACK_FAILED");
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
 pub fn discover() -> Result<Option<Network>, &'static str> {
     use std::process::Command;
     // Read only: two IPv4 observations from the existing Ubuntu instance.
     let script = "import subprocess,socket; r=subprocess.check_output(['ip','-4','route','show','default'],text=True).split(); g=r[r.index('via')+1]; a=subprocess.check_output(['hostname','-I'],text=True).split(); print(a[0]+' '+g)";
-    let output = Command::new("wsl.exe")
-        .args(["-d", "Ubuntu", "--", "/usr/bin/python3", "-c", script])
-        .output()
-        .map_err(|_| "WSL_UNAVAILABLE")?;
+    let mut command = Command::new("wsl.exe");
+    command.args(["-d", "Ubuntu", "--", "/usr/bin/python3", "-c", script]);
+    let output = read_only_command(command)?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -43,10 +75,9 @@ pub fn discover() -> Result<Option<Network>, &'static str> {
         "if (-not (Get-NetIPAddress -AddressFamily IPv4 -IPAddress '{}' -ErrorAction SilentlyContinue)) {{ exit 4 }}",
         network.gateway
     );
-    let check = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &command])
-        .output()
-        .map_err(|_| "WSL_GATEWAY_NOT_OWNED")?;
+    let mut native = Command::new("powershell.exe");
+    native.args(["-NoProfile", "-NonInteractive", "-Command", &command]);
+    let check = read_only_command(native)?;
     if !check.status.success() {
         return Err("WSL_GATEWAY_NOT_OWNED");
     }
@@ -110,10 +141,9 @@ pub fn probe(network: &Network) -> Result<(), &'static str> {
         r#"import socket; s=socket.socket(); s.settimeout(1.5); s.connect(('{}',2081)); s.close()"#,
         network.gateway
     );
-    let out = Command::new("wsl.exe")
-        .args(["-d", "Ubuntu", "--", "/usr/bin/python3", "-c", &source])
-        .output()
-        .map_err(|_| "WSL_SOCKET_TEST_UNAVAILABLE")?;
+    let mut native = Command::new("wsl.exe");
+    native.args(["-d", "Ubuntu", "--", "/usr/bin/python3", "-c", &source]);
+    let out = read_only_command(native)?;
     if out.status.success() {
         Ok(())
     } else {

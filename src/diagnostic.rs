@@ -1,13 +1,13 @@
 //! Read-only diagnostics; remote facts are never fabricated.
 use crate::{
-    config, lifecycle,
+    config, egress, lifecycle,
     model::{Diagnostic, Health, Target},
     selector,
 };
 use chrono::Utc;
 use std::{
     net::{SocketAddr, TcpStream},
-    time::Duration,
+    time::{Duration, Instant},
 };
 pub const IDS: [&str; 10] = [
     "internet",
@@ -37,10 +37,259 @@ pub fn batch(ids: &[&str], deep: bool) -> Vec<Diagnostic> {
     } else {
         None
     };
-    ids.iter()
+    if !deep || !cfg!(windows) {
+        return ids
+            .iter()
+            .map(|id| inspect_with_task(id, deep, task.as_ref()))
+            .collect();
+    }
+    // Run independent real HTTPS probes at the same time as native local readback.
+    // A probe never changes a selector, firewall, task, or remote process.
+    let deadline = Instant::now() + Duration::from_millis(9300);
+    let need_desktop = ids
+        .iter()
+        .any(|id| *id == "windows/desktop-selector" || *id == "vultr/line1");
+    let need_line2 = ids.contains(&"vultr/line2");
+    let config = config::read(&config::installed()).ok();
+    let running = task.as_ref().is_some_and(|v| matches!(v, Ok(true)));
+    let desktop = if need_desktop && running {
+        config
+            .clone()
+            .map(|c| std::thread::spawn(move || selected_desktop_egress(c, deadline)))
+    } else {
+        None
+    };
+    let line2 = if need_line2 {
+        config.map(|c| std::thread::spawn(move || line2_egress(c, deadline)))
+    } else {
+        None
+    };
+    let mut results: Vec<_> = ids
+        .iter()
         .map(|id| inspect_with_task(id, deep, task.as_ref()))
-        .collect()
+        .collect();
+    let desktop_proof = desktop.map(|h| {
+        h.join().unwrap_or(egress::Proof {
+            verdict: egress::Verdict::Unknown,
+            reason: "EGRESS_PROBE_PANIC",
+        })
+    });
+    let line2_proof = line2.map(|h| {
+        h.join().unwrap_or(Line2Result {
+            verdict: egress::Verdict::Unknown,
+            reason: "EGRESS_PROBE_PANIC",
+            actual: "line2 probe thread unavailable".into(),
+        })
+    });
+    for d in &mut results {
+        match d.resource_id.as_str() {
+            "windows/desktop-selector" if d.health == Health::Healthy => {
+                if let Some(proof) = &desktop_proof {
+                    d.health = proof_health(proof.verdict);
+                    d.reason_code = proof.reason;
+                    d.scope = "selected_https_egress";
+                    d.source = "native-curl-https-via-sing-box";
+                    d.observed_at = now();
+                    d.next_action = "internet diagnose vultr/line1";
+                }
+            }
+            "vultr/line1" if desktop_proof.is_some() => {
+                let proof = desktop_proof.as_ref().expect("checked");
+                // One selected path cannot prove the other VLESS/Hy2 paths.
+                d.health = if proof.verdict == egress::Verdict::Failed {
+                    Health::Failed
+                } else {
+                    Health::Unknown
+                };
+                d.reason_code = if proof.verdict == egress::Verdict::Pass {
+                    "SELECTED_LINE1_EGRESS_PASS_OTHERS_NOT_CHECKED"
+                } else {
+                    proof.reason
+                };
+                d.scope = "selected_desktop_line1_only";
+                d.source = "native-curl-https-via-sing-box";
+                d.observed_at = now();
+                d.actual = Some(format!("selected_desktop_egress={:?}", proof.verdict));
+            }
+            "vultr/line2" if line2_proof.is_some() => {
+                let proof = line2_proof.as_ref().expect("checked");
+                // The HTTP direct/WARP pair alone does not prove all 6 Line2 inbounds.
+                d.health = proof_health(proof.verdict);
+                d.reason_code = proof.reason;
+                d.scope = "six_line2_http_socks_https_ipv4_https_egress";
+                d.source = "native-curl-https-via-line2";
+                d.observed_at = now();
+                d.actual = Some(proof.actual.clone());
+            }
+            _ => {}
+        }
+    }
+    results
 }
+fn proof_health(verdict: egress::Verdict) -> Health {
+    match verdict {
+        egress::Verdict::Pass => Health::Healthy,
+        egress::Verdict::Failed => Health::Failed,
+        egress::Verdict::Unknown => Health::Unknown,
+    }
+}
+
+fn native_vm(config: &serde_json::Value) -> Option<std::net::Ipv4Addr> {
+    config
+        .pointer("/outbounds/0/server")?
+        .as_str()?
+        .parse()
+        .ok()
+}
+fn selected_desktop_egress(config: serde_json::Value, deadline: Instant) -> egress::Proof {
+    let Some(vm) = native_vm(&config) else {
+        return egress::Proof {
+            verdict: egress::Verdict::Unknown,
+            reason: "REMOTE_ENDPOINT_UNKNOWN",
+        };
+    };
+    let Ok(selected) = config::selected(&config, Target::Desktop) else {
+        return egress::Proof {
+            verdict: egress::Verdict::Unknown,
+            reason: "SELECTOR_CONFIG_INVALID",
+        };
+    };
+    egress::https(
+        "http://127.0.0.1:2080",
+        None,
+        vm,
+        selected.tag().starts_with("warp-"),
+        deadline,
+        None,
+    )
+}
+#[derive(Debug)]
+struct Line2Result {
+    verdict: egress::Verdict,
+    reason: &'static str,
+    actual: String,
+}
+
+fn line2_egress(config: serde_json::Value, deadline: Instant) -> Line2Result {
+    use egress::Verdict;
+    let unknown = |reason: &'static str| Line2Result {
+        verdict: Verdict::Unknown,
+        reason,
+        actual: "line2 endpoints not verified".into(),
+    };
+    let Some(vm) = native_vm(&config) else {
+        return unknown("REMOTE_ENDPOINT_UNKNOWN");
+    };
+    let Some(user) = config
+        .pointer("/inbounds/1/users/0/username")
+        .and_then(|v| v.as_str())
+    else {
+        return unknown("LINE2_CREDENTIAL_NOT_CONFIGURED");
+    };
+    let Some(pass) = config
+        .pointer("/inbounds/1/users/0/password")
+        .and_then(|v| v.as_str())
+    else {
+        return unknown("LINE2_CREDENTIAL_NOT_CONFIGURED");
+    };
+    let domain_for = |tag: &str| {
+        config["outbounds"]
+            .as_array()?
+            .iter()
+            .find(|v| v["tag"] == tag)?["tls"]["server_name"]
+            .as_str()
+    };
+    let Some(domain) = domain_for("direct-hysteria2") else {
+        return unknown("LINE2_TLS_DOMAIN_UNKNOWN");
+    };
+    if domain_for("warp-hysteria2") != Some(domain)
+        || domain.is_empty()
+        || domain.len() > 253
+        || !domain.contains('.')
+        || !domain
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    {
+        return unknown("LINE2_TLS_DOMAIN_INVALID");
+    }
+    // Six native Line2 inbounds; only confirmed HTTPS egress is claimed.
+    // Remote TLS proxies are pinned to the VM IP but verified by the DNS/SAN name.
+    let routes = [
+        ("warp_http", "http", 3128u16, true),
+        ("warp_socks", "socks5h", 1080, true),
+        ("warp_https", "https", 9443, true),
+        ("direct_http", "http", 4128, false),
+        ("direct_socks", "socks5h", 4080, false),
+        ("direct_https", "https", 4443, false),
+    ];
+    let proofs: Vec<(&str, egress::Proof)> = std::thread::scope(|scope| {
+        let jobs: Vec<_> = routes
+            .iter()
+            .map(|(label, scheme, port, warp)| {
+                let proxy = if *scheme == "https" {
+                    format!("https://{domain}:{port}")
+                } else {
+                    format!("{scheme}://{vm}:{port}")
+                };
+                let pinned = if *scheme == "https" {
+                    Some(format!("{domain}:{port}:{vm}"))
+                } else {
+                    None
+                };
+                (
+                    *label,
+                    scope.spawn(move || {
+                        egress::https(
+                            &proxy,
+                            Some((user, pass)),
+                            vm,
+                            *warp,
+                            deadline,
+                            pinned.as_deref(),
+                        )
+                    }),
+                )
+            })
+            .collect();
+        jobs.into_iter()
+            .map(|(label, job)| {
+                (
+                    label,
+                    job.join().unwrap_or(egress::Proof {
+                        verdict: Verdict::Unknown,
+                        reason: "EGRESS_PROBE_PANIC",
+                    }),
+                )
+            })
+            .collect()
+    });
+    let actual = proofs
+        .iter()
+        .map(|(name, p)| format!("{name}={:?}/{}", p.verdict, p.reason))
+        .collect::<Vec<_>>()
+        .join("; ");
+    if let Some((_, fail)) = proofs.iter().find(|(_, p)| p.verdict == Verdict::Failed) {
+        return Line2Result {
+            verdict: Verdict::Failed,
+            reason: fail.reason,
+            actual,
+        };
+    }
+    if proofs.iter().all(|(_, p)| p.verdict == Verdict::Pass) {
+        Line2Result {
+            verdict: Verdict::Pass,
+            reason: "LINE2_SIX_HTTPS_EGRESS_PATHS_CONFIRMED",
+            actual,
+        }
+    } else {
+        Line2Result {
+            verdict: Verdict::Unknown,
+            reason: "LINE2_EGRESS_INCOMPLETE",
+            actual,
+        }
+    }
+}
+
 pub fn inspect(id: &str, deep: bool) -> Diagnostic {
     inspect_with_task(id, deep, None)
 }
@@ -83,7 +332,9 @@ fn inspect_with_task(
             Some("internet"),
             "internet status --deep",
         ),
-        "vultr/vm" | "vultr/line1" | "vultr/line2" => remote_transport(id, deep),
+        "vultr/vm" | "vultr/line1" | "vultr/line2" => {
+            remote_transport(id, deep && id == "vultr/vm")
+        }
         "windows/sing-box" => local_binary(task),
         "windows/desktop-selector" => local_selector(id, Target::Desktop, deep, task),
         "windows/wsl-selector" => local_selector(id, Target::Wsl, deep, task),
