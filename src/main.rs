@@ -338,9 +338,9 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
             if command == "proxies" && !json_mode {
                 print_proxy_list(&v);
             } else if !json_mode
-                && (command == "tun" || command == "selected-apps")
+                && (command == "tun" || command == "selected-apps" || command == "app")
                 && a.len() == 2
-                && a[1] == "status"
+                && (a[1] == "status" || (command == "app" && a[1] == "list"))
             {
                 print_app_state(&v);
             } else {
@@ -355,6 +355,11 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
                         "internet tun on (changes Windows routes; verify independent control)"
                     } else if code=="APP_DIRECT_REQUIRES_SELECTED_APPS" {
                         "internet selected-apps on (changes routing for other applications)"
+                    } else if code == "APP_EXECUTABLE_AMBIGUOUS_USE_PATH"
+                        || code == "APP_NOT_RUNNING_USE_FULL_PATH" {
+                        "Use the exact executable path (internet app C:\\path\\program.exe vm)"
+                    } else if code == "TUN_NATIVE_STATE_MISMATCH" {
+                        "internet diagnose windows/tun"
                     } else { "internet help" }}),
                 json_mode,
             );

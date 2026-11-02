@@ -604,14 +604,21 @@ pub fn app_set(raw: &str, vm: bool) -> Result<Value, &'static str> {
     if vm && !old.managed_tun {
         return Err("APP_TUN_OFF_ENABLE_EXPLICITLY");
     }
-    if old.managed_tun && !old.selected_apps {
-        if !vm {
-            return Err("APP_DIRECT_REQUIRES_SELECTED_APPS");
-        }
-        return Ok(json!({"ok":true,"changed":false,
-            "mode":"ALL_APPLICATIONS_VIA_VM","next_action":"internet app list"}));
+    if old.managed_tun && !old.selected_apps && !vm {
+        return Err("APP_DIRECT_REQUIRES_SELECTED_APPS");
     }
     let (exact, source) = resolve_application(raw, &old, vm, None)?;
+    if old.managed_tun && !old.selected_apps {
+        let current = status()?;
+        if current["desired_native_match"] != true || current["native_tun_up"] != true {
+            return Err("TUN_NATIVE_STATE_MISMATCH");
+        }
+        return Ok(json!({"ok":true,"changed":false,
+            "application":exact,"identity_source":source,
+            "scope":"ALL_APPLICATIONS_VIA_VM",
+            "physical_egress":"NOT_TESTED_BY_STATUS",
+            "next_action":"internet app list"}));
+    }
     let next = app_transition(&old, vm, &exact)?;
     let mut result = persist(&path(), &old, &next)?;
     result["application"] = json!(exact);
@@ -641,6 +648,9 @@ pub fn app_diagnose(raw: &str) -> Result<Value, &'static str> {
     let configured = native["inbounds"].as_array().is_some_and(|a| a.len() == 3);
     if state.managed_tun != configured {
         return Err("TUN_DESIRED_NATIVE_DRIFT");
+    }
+    if adapter_up()? != state.managed_tun {
+        return Err("TUN_NATIVE_STATE_MISMATCH");
     }
     if state.managed_tun && state.selected_apps && hot_native(&native) {
         hot_readback(&state)?;
