@@ -1,0 +1,157 @@
+name: S2 Windows candidate
+
+# Compile an immutable candidate from exact PR head. Publishing a GitHub
+# pre-release only delivers test binaries; it never deploys or touches Windows.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Cargo.*'
+      - 'src/**'
+      - 'windows/**'
+      - '.github/workflows/s2-windows.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  linux-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Rust unit and negative tests
+        run: cargo test --locked --all-targets
+      - name: Rust lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Python credential renderer dependencies
+        run: python3 -m pip install 'cryptography==43.0.3'
+      - name: Python renderer tests (ephemeral fake credentials)
+        run: python3 -m unittest discover -s windows/tests -p 'test_*.py' -v
+      - name: Native pinned sing-box configuration validation
+        run: python3 windows/tests/check_native.py
+
+  windows-package:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    needs: linux-contract
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Rust stable MSVC
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Native Windows tests and build
+        shell: pwsh
+        run: |
+          cargo test --locked --target x86_64-pc-windows-msvc --all-targets
+          if ($LASTEXITCODE -ne 0) { throw 'WINDOWS_TEST_FAILED' }
+          cargo build --release --locked --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'WINDOWS_BUILD_FAILED' }
+          $null = $tokens = $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'windows/install.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) { throw 'INSTALLER_POWERSHELL_PARSE_FAILED' }
+      - name: Verified official sing-box v1.14.2 (never install globally)
+        id: singbox
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $r = Invoke-RestMethod -Uri 'https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.14.2'
+          $a = @($r.assets | Where-Object { $_.name -ceq 'sing-box-1.14.2-windows-amd64.zip' })
+          if ($a.Count -ne 1 -or $a[0].digest -notmatch '^sha256:[a-f0-9]{64}$') {
+            throw 'UPSTREAM_ASSET_IDENTITY_NOT_PROVEN'
+          }
+          $zip = Join-Path $env:RUNNER_TEMP 'sing-box-upstream.zip'
+          Invoke-WebRequest -Uri $a[0].browser_download_url -OutFile $zip
+          $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+          if ($actual -cne $a[0].digest.Substring(7).ToUpperInvariant()) {
+            throw 'UPSTREAM_SHA256_MISMATCH'
+          }
+          $dir=Join-Path $env:RUNNER_TEMP 'sing-box-official'
+          Expand-Archive -LiteralPath $zip -DestinationPath $dir
+          $exe=@(Get-ChildItem -Path $dir -Filter sing-box.exe -File -Recurse)
+          if ($exe.Count -ne 1) { throw 'UPSTREAM_BINARY_MISSING_OR_AMBIGUOUS' }
+          $ver=& $exe[0].FullName version
+          if ($LASTEXITCODE -ne 0 -or (($ver | Out-String) -notmatch '1\.14\.2')) {
+            throw 'UPSTREAM_VERSION_MISMATCH'
+          }
+          "SINGBOX_EXE=$($exe[0].FullName)" >> $env:GITHUB_ENV
+      - name: Build verifiable release candidate package
+        shell: pwsh
+        run: |
+          $pkg=Join-Path $env:RUNNER_TEMP 'internet-windows-x64.zip'
+          ./windows/package.ps1 -Exe 'target/x86_64-pc-windows-msvc/release/internet.exe' -SingBoxExe $env:SINGBOX_EXE -Output $pkg
+          if (-not (Test-Path -LiteralPath $pkg)) { throw 'PACKAGE_MISSING' }
+          New-Item -ItemType Directory -Path 'release-candidate' -Force | Out-Null
+          Copy-Item -LiteralPath $pkg -Destination 'release-candidate/internet-windows-x64.zip'
+          Copy-Item -LiteralPath 'windows/install.ps1' -Destination 'release-candidate/install.ps1'
+      - name: Native installer negative tests on disposable CI host
+        shell: pwsh
+        run: |
+          ./windows/tests/check_installer.ps1 -PackagePath (Join-Path $env:RUNNER_TEMP 'internet-windows-x64.zip')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: internet-s2-windows-candidate
+          path: release-candidate/
+          retention-days: 7
+          if-no-files-found: error
+
+  candidate-release:
+    # Only this repository's explicitly scoped S2 PR may publish a test candidate.
+    # No deployment, secrets beyond the built-in short-lived GITHUB_TOKEN, or VM access.
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/s2-windows-cli-bootstrap' }}
+    needs: [linux-contract, windows-package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: internet-s2-windows-candidate
+          path: candidate
+      - name: Publish immutable S2 test pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f candidate/internet-windows-x64.zip
+          test -f candidate/install.ps1
+          test "${#SOURCE_SHA}" -eq 40
+          tag="v0.2.0-rc-${SOURCE_SHA:0:12}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "RELEASE_TAG_ALREADY_EXISTS_NO_OVERWRITE"
+            exit 1
+          fi
+          package_sha=$(sha256sum candidate/internet-windows-x64.zip | cut -d' ' -f1)
+          cat > /tmp/internet-release-notes.txt <<EOF
+          S2 Windows test candidate, NOT production accepted.
+          Source commit: $SOURCE_SHA
+          CI run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          Package SHA256: $package_sha
+          GitHub Issues #7/#8/#16 remain canonical requirements and evidence.
+          No Windows deployment, no VM changes. Do not promote before PHYSICAL_PASS.
+          EOF
+          gh release create "$tag" \
+            candidate/internet-windows-x64.zip \
+            candidate/install.ps1 \
+            --title "INTERNET S2 test candidate ${SOURCE_SHA:0:12}" \
+            --notes-file /tmp/internet-release-notes.txt \
+            --target "$SOURCE_SHA" --prerelease
+          gh release view "$tag" --json tagName,isPrerelease,assets \
+            --jq '{tagName,isPrerelease,assets:[.assets[]|{name,size}]}'
