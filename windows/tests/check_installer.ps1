@@ -76,6 +76,56 @@ try {
     if($LASTEXITCODE -ne 0){throw 'RECOVERED_CLI_NOT_EXECUTABLE'}
     'FAILED_UPDATE_RECOVERY=PASS'
 
+    # One disposable NTFS fixture: terminate only the subprocess we created
+    # after File.Replace and prove both old backup and new destination survive.
+    $atomic=Join-Path $stage 'atomic-interruption'
+    New-Item -ItemType Directory -Path $atomic | Out-Null
+    $oldFile=Join-Path $atomic 'installed.bin'
+    $newFile=Join-Path $atomic 'candidate.bin'
+    $saved=Join-Path $atomic 'previous.bin'
+    $signal=Join-Path $atomic 'swapped.flag'
+    [IO.File]::WriteAllBytes($oldFile,[Text.Encoding]::ASCII.GetBytes(('old-version-'*1024)))
+    [IO.File]::WriteAllBytes($newFile,[Text.Encoding]::ASCII.GetBytes(('new-version-'*1024)))
+    $oldHash=(Get-FileHash -LiteralPath $oldFile -Algorithm SHA256).Hash
+    $newHash=(Get-FileHash -LiteralPath $newFile -Algorithm SHA256).Hash
+    if($oldHash -ceq $newHash){throw 'ATOMIC_FIXTURE_INVALID'}
+    $childFile=Join-Path $atomic 'replace-and-block.ps1'
+    @(
+        'param([string]$Candidate,[string]$Installed,[string]$Backup,[string]$Signal)',
+        '$ErrorActionPreference=''Stop''',
+        '[IO.File]::Replace($Candidate,$Installed,$Backup)',
+        '[IO.File]::WriteAllText($Signal,''DONE'')',
+        'Start-Sleep -Seconds 20'
+    ) | Set-Content -LiteralPath $childFile -Encoding utf8
+    $child=Start-Process -FilePath (Get-Command pwsh.exe).Source -ArgumentList @(
+        '-NoProfile','-NonInteractive','-File',
+        ('"'+$childFile+'"'),('"'+$newFile+'"'),('"'+$oldFile+'"'),
+        ('"'+$saved+'"'),('"'+$signal+'"')
+    ) -PassThru
+    try {
+        $until=[datetime]::UtcNow.AddSeconds(10)
+        while(-not (Test-Path -LiteralPath $signal) -and [datetime]::UtcNow -lt $until) {
+            if($child.HasExited){throw 'ATOMIC_CHILD_EXITED_EARLY'}
+            Start-Sleep -Milliseconds 25
+        }
+        if(-not (Test-Path -LiteralPath $signal)){throw 'ATOMIC_CHILD_NOT_READY'}
+        Stop-Process -Id $child.Id -Force -ErrorAction Stop
+        $child.WaitForExit(5000) | Out-Null
+    } finally {
+        if(-not $child.HasExited){ Stop-Process -Id $child.Id -Force -ErrorAction Stop }
+        $child.Dispose()
+    }
+    if((Get-FileHash -LiteralPath $oldFile -Algorithm SHA256).Hash -cne $newHash -or
+       (Get-FileHash -LiteralPath $saved -Algorithm SHA256).Hash -cne $oldHash){
+        throw 'ATOMIC_PROCESS_TERMINATION_LOST_WORKING_FILE'
+    }
+    'ATOMIC_REPLACE_CHILD_TERMINATION=PASS'
+    [IO.File]::Replace($saved,$oldFile,(Join-Path $atomic 'discarded.bin'))
+    if((Get-FileHash -LiteralPath $oldFile -Algorithm SHA256).Hash -cne $oldHash) {
+        throw 'ATOMIC_POST_TERMINATION_ROLLBACK_FAILED'
+    }
+    'ATOMIC_REPLACE_RECOVERY=PASS'
+
     $task=Get-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\' -ErrorAction Stop
     if($task.State -eq 'Running'){throw 'INSTALL_STARTED_DATAPLANE'}
     'FIRST_INSTALL_NO_NETWORK_PROCESS=PASS'

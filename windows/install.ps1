@@ -46,6 +46,11 @@ try {
         throw 'INTERNET_ADMIN_REQUIRED'
     }
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
+    # File.Replace needs the backup on the same NTFS volume as the owned root.
+    # Refuse a cross-volume temp directory rather than unsafe rename windows.
+    if ([IO.Path]::GetPathRoot($stage) -cne [IO.Path]::GetPathRoot($root)) {
+        throw 'INSTALL_TEMP_VOLUME_MISMATCH'
+    }
     if (-not $PackagePath) {
         $PackagePath = Join-Path $stage 'internet-windows-x64.zip'
         $uri = "https://github.com/iamaman11/internet/releases/download/$ReleaseTag/internet-windows-x64.zip"
@@ -73,6 +78,11 @@ try {
         $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
         if ($hash -cne [string]$entry[0].sha256) { throw 'PACKAGE_SHA256_MISMATCH' }
     }
+    # Validate the candidate CLI before replacing a working executable.
+    # A hard interruption after an atomic replacement then leaves a runnable
+    # old or new CLI, not a binary that failed its own basic self-check.
+    & (Join-Path $extract 'internet.exe') help --json | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'PACKAGE_CLI_SELF_CHECK_FAILED' }
     if (Test-Path -LiteralPath $root) {
         if (Test-Path -LiteralPath $marker) {
             if ((Get-Content -LiteralPath $marker -Raw).Trim() -cne $owner) {
@@ -126,11 +136,14 @@ try {
         if (Test-Path -LiteralPath $dest) {
             $backup = Join-Path $old $name
             New-Item -ItemType Directory -Path (Split-Path -Parent $backup) -Force | Out-Null
-            Move-Item -LiteralPath $dest -Destination $backup
+            # NTFS atomic replacement: the destination is never absent while
+            # a running CLI update swaps the old and candidate file.
+            [IO.File]::Replace($incoming, $dest, $backup)
             $backups += @{ dest=$dest; backup=$backup }
+        } else {
+            Move-Item -LiteralPath $incoming -Destination $dest
+            $written += $dest
         }
-        Move-Item -LiteralPath $incoming -Destination $dest
-        $written += $dest
     }
     & (Join-Path $root 'internet.exe') help --json | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'INSTALLED_CLI_SELF_CHECK_FAILED' }
@@ -163,7 +176,18 @@ finally {
             if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
         }
         for ($i = $backups.Count - 1; $i -ge 0; $i--) {
-            Move-Item -LiteralPath $backups[$i].backup -Destination $backups[$i].dest
+            $oldFile = $backups[$i].backup
+            $dest = $backups[$i].dest
+            if (Test-Path -LiteralPath $oldFile) {
+                if (Test-Path -LiteralPath $dest) {
+                    # Keep the displaced candidate only inside this disposable installer stage.
+                    $discarded = "$oldFile.discarded"
+                    if (Test-Path -LiteralPath $discarded) { throw 'INSTALL_ROLLBACK_STAGING_CONFLICT' }
+                    [IO.File]::Replace($oldFile, $dest, $discarded)
+                } else {
+                    Move-Item -LiteralPath $oldFile -Destination $dest
+                }
+            }
         }
         if ($createdRoot -and (Test-Path -LiteralPath $root)) {
             if (@(Get-ChildItem -LiteralPath $root -Force -Recurse -File).Count -eq 0) {
