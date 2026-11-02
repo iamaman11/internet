@@ -2,7 +2,7 @@
 use internet::{
     config, diagnostic, lifecycle,
     model::{Health, Route, Target},
-    selector,
+    selector, tun,
 };
 use serde_json::{Value, json};
 use std::{
@@ -29,10 +29,12 @@ fn emit(v: &Value, json_mode: bool) {
         println!("{}", v);
     }
 }
-const LOCAL_STATUS: [&str; 3] = [
+const LOCAL_STATUS: [&str; 5] = [
     "windows/sing-box",
     "windows/desktop-selector",
     "windows/wsl-selector",
+    "windows/tun",
+    "windows/selected-apps",
 ];
 
 fn diagnostic_exit(
@@ -187,16 +189,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
     let command = a.first().copied().unwrap_or("");
     let effect: Result<Value, &'static str> = match (command, a.as_slice()) {
         ("status", ["status"]) => {
-            return diagnostic_output(
-                &[
-                    "windows/sing-box",
-                    "windows/desktop-selector",
-                    "windows/wsl-selector",
-                ],
-                false,
-                json_mode,
-                false,
-            );
+            return diagnostic_output(&LOCAL_STATUS, false, json_mode, false);
         }
         ("status", ["status", "--deep"]) => {
             return diagnostic_output(&diagnostic::IDS, true, json_mode, true);
@@ -209,6 +202,19 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         }
         ("route", ["route", r]) => apply_route(Target::Desktop, r),
         ("wsl", ["wsl", "route", r]) => apply_route(Target::Wsl, r),
+        ("tun", ["tun", "status"]) | ("selected-apps", ["selected-apps", "status"]) => {
+            tun::status()
+        }
+        ("tun", ["tun", "on"]) => tun::command(tun::Switch::ManagedTun, true),
+        ("tun", ["tun", "off"]) => tun::command(tun::Switch::ManagedTun, false),
+        ("selected-apps", ["selected-apps", "on"]) => tun::command(tun::Switch::SelectedApps, true),
+        ("selected-apps", ["selected-apps", "off"]) => {
+            tun::command(tun::Switch::SelectedApps, false)
+        }
+        ("selected-apps", ["selected-apps", "add", name]) => tun::change_application(true, name),
+        ("selected-apps", ["selected-apps", "remove", name]) => {
+            tun::change_application(false, name)
+        }
         ("start", ["start"]) => lifecycle::start()
             .map(|_| json!({"ok":true,"owner":"Windows Task Scheduler","observed":"running"})),
         ("stop", ["stop"]) => lifecycle::stop()
@@ -222,7 +228,9 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
             json!({"commands":["status [--deep]","tree","inspect <id>","diagnose [id]",
             "route <direct-auto|direct-hysteria2|direct-vless|warp-auto|warp-hysteria2|warp-vless>",
             "wsl route <same>","start","stop","restart","configure --stdin",
-            "backup export <external-directory>","restore <external-directory>"],"note":"S3/S4 are deferred"}),
+            "backup export <external-directory>","restore <external-directory>",
+             "tun <status|on|off>","selected-apps <status|on|off|add EXE|remove EXE>"],
+             "note":"S4 native TUN has control-IP exclusion; selected-apps bypass is DIRECT outbound, not kernel bypass"}),
         ),
         _ => Err("COMMAND_INVALID"),
     };
@@ -236,9 +244,16 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
                 &json!({"ok":false,"reason_code":code,"next_action": "internet help"}),
                 json_mode,
             );
-            if code == "WINDOWS_ONLY" || code == "ROUTE_UNSUPPORTED" {
+            if code == "WINDOWS_ONLY"
+                || code == "ROUTE_UNSUPPORTED"
+                || code == "S4_WINDOWS_KERNEL_BYPASS_UNSUPPORTED"
+            {
                 2
-            } else if code == "TASK_READBACK_UNKNOWN" || code == "SING_BOX_API_UNREACHABLE" {
+            } else if code == "TASK_READBACK_UNKNOWN"
+                || code == "SING_BOX_API_UNREACHABLE"
+                || code == "S4_INDEPENDENT_CONTROL_NOT_VERIFIED"
+                || code == "TUN_STATE_INTERRUPTED"
+            {
                 3
             } else if code == "COMMAND_INVALID" {
                 1
@@ -250,7 +265,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
 }
 fn menu() -> i32 {
     println!(
-        "INTERNET — Windows/WSL\n1 Status   2 Diagnose   3 Start   4 Stop   5 Desktop route   6 WSL route   0 Exit"
+        "INTERNET — Windows/WSL\n1 Status   2 Diagnose   3 Start   4 Stop   5 Desktop route   6 WSL route\n7 TUN status   8 Selected Apps status   9 Selected Apps ON/OFF   10 Add app   11 Remove app   12 TUN ON/OFF   0 Exit"
     );
     let mut line = String::new();
     if io::stdin().read_line(&mut line).is_err() {
@@ -263,12 +278,33 @@ fn menu() -> i32 {
         "4" => vec!["stop".into()],
         "5" => vec!["route".into()],
         "6" => vec!["wsl".into(), "route".into()],
+        "7" => vec!["tun".into(), "status".into()],
+        "8" => vec!["selected-apps".into(), "status".into()],
+        "9" => vec!["selected-apps".into()],
+        "10" => vec!["selected-apps".into(), "add".into()],
+        "11" => vec!["selected-apps".into(), "remove".into()],
+        "12" => vec!["tun".into()],
         "0" => return 0,
         _ => return 1,
     };
     if line.trim() == "5" || line.trim() == "6" {
         println!(
             "Route: direct-auto | direct-hysteria2 | direct-vless | warp-auto | warp-hysteria2 | warp-vless"
+        );
+        let mut choice = String::new();
+        if io::stdin().read_line(&mut choice).is_err() {
+            return 1;
+        }
+        args.push(choice.trim().to_owned());
+    }
+    if ["9", "10", "11", "12"].contains(&line.trim()) {
+        println!(
+            "{}",
+            if line.trim() == "9" || line.trim() == "12" {
+                "Selected Apps: on | off"
+            } else {
+                "Executable name or absolute path:"
+            }
         );
         let mut choice = String::new();
         if io::stdin().read_line(&mut choice).is_err() {
