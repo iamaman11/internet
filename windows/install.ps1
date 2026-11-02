@@ -195,5 +195,15 @@ finally {
             }
         }
     }
-    if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+    if (Test-Path -LiteralPath $stage) {
+        try {
+            Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction Stop
+        } catch {
+            if (-not $success) { throw }
+            # Windows can keep the previous binary open while an older
+            # interactive menu is still running. The new installed files
+            # are already validated; cleanup is a deferred non-secret task.
+            Write-Warning 'INSTALL_TEMP_CLEANUP_DEFERRED_OLD_EXE_IN_USE'
+        }
+    }
 }
