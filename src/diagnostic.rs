@@ -50,6 +50,7 @@ pub fn batch(ids: &[&str], deep: bool) -> Vec<Diagnostic> {
         .iter()
         .any(|id| *id == "windows/desktop-selector" || *id == "vultr/line1");
     let need_line2 = ids.contains(&"vultr/line2");
+    let need_line1 = ids.contains(&"vultr/line1");
     let config = config::read(&config::installed()).ok();
     let running = task.as_ref().is_some_and(|v| matches!(v, Ok(true)));
     let desktop = if need_desktop && running {
@@ -63,6 +64,13 @@ pub fn batch(ids: &[&str], deep: bool) -> Vec<Diagnostic> {
         config
             .clone()
             .map(|c| std::thread::spawn(move || line2_egress(c, deadline)))
+    } else {
+        None
+    };
+    // Independent native outbound GET probes run alongside the Desktop/Line2
+    // egress probes and WSL local readback; no selector PUT, no network mutation.
+    let line1 = if need_line1 && running {
+        Some(std::thread::spawn(move || line1_protocols(deadline)))
     } else {
         None
     };
@@ -104,6 +112,12 @@ pub fn batch(ids: &[&str], deep: bool) -> Vec<Diagnostic> {
             actual: "line2 probe thread unavailable".into(),
         })
     });
+    let line1_proof = line1.map(|job| {
+        job.join().unwrap_or(Line1Result {
+            all_pass: false,
+            actual: "line1 probe thread panicked".into(),
+        })
+    });
     for d in &mut results {
         match d.resource_id.as_str() {
             "windows/desktop-selector" if d.health == Health::Healthy => {
@@ -129,10 +143,20 @@ pub fn batch(ids: &[&str], deep: bool) -> Vec<Diagnostic> {
                 } else {
                     proof.reason
                 };
-                d.scope = "selected_desktop_line1_only";
-                d.source = "native-curl-https-via-sing-box";
+                if let Some(routes) = &line1_proof {
+                    d.reason_code = line1_reason(proof, routes.all_pass);
+                    d.scope = "four_native_outbound_https_protocol_plus_selected_desktop_egress";
+                    d.source = "sing-box-clash-api-delay-and-native-curl";
+                    d.actual = Some(format!(
+                        "selected_desktop_egress={:?}; {}",
+                        proof.verdict, routes.actual
+                    ));
+                } else {
+                    d.scope = "selected_desktop_line1_only";
+                    d.source = "native-curl-https-via-sing-box";
+                    d.actual = Some(format!("selected_desktop_egress={:?}", proof.verdict));
+                }
                 d.observed_at = now();
-                d.actual = Some(format!("selected_desktop_egress={:?}", proof.verdict));
             }
             "vultr/line2" if line2_proof.is_some() => {
                 let proof = line2_proof.as_ref().expect("checked");
@@ -234,6 +258,58 @@ fn selected_wsl_egress(c: &serde_json::Value, deadline: Instant) -> egress::Proo
             verdict: egress::Verdict::Unknown,
             reason,
         },
+    }
+}
+
+fn line1_reason(selected: &egress::Proof, four_probes_pass: bool) -> &'static str {
+    if selected.verdict != egress::Verdict::Pass {
+        return selected.reason;
+    }
+    if four_probes_pass {
+        "LINE1_FOUR_HTTPS_PROTOCOL_PASS_IP_NOT_CHECKED"
+    } else {
+        "LINE1_HTTPS_PROTOCOL_INCOMPLETE"
+    }
+}
+
+#[derive(Debug)]
+struct Line1Result {
+    all_pass: bool,
+    actual: String,
+}
+/// The four native sing-box outbound probes verify only HTTPS reachability.
+/// No claimed public IP/WARP identity for unselected paths: response is latency.
+fn line1_protocols(deadline: Instant) -> Line1Result {
+    let tags = [
+        "direct-hysteria2",
+        "direct-vless",
+        "warp-hysteria2",
+        "warp-vless",
+    ];
+    let results: Vec<_> = std::thread::scope(|scope| {
+        let jobs: Vec<_> = tags
+            .iter()
+            .map(|tag| {
+                (
+                    *tag,
+                    scope.spawn(move || selector::outbound_delay_ms(tag, deadline)),
+                )
+            })
+            .collect();
+        jobs.into_iter()
+            .map(|(tag, job)| (tag, job.join().unwrap_or(Err("LINE1_PROBE_PANIC"))))
+            .collect()
+    });
+    Line1Result {
+        all_pass: results.iter().all(|(_, value)| value.is_ok()),
+        actual: results
+            .iter()
+            .map(|(tag, result)| match result {
+                Ok(ms) => format!("{tag}=HTTPS_PROTOCOL_PASS/{ms}ms"),
+                Err(reason) => format!("{tag}=UNKNOWN/{reason}"),
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
     }
 }
 
@@ -687,6 +763,31 @@ mod tests {
         c["inbounds"][1]["users"][0]["password"] = serde_json::json!("test-only");
         c["outbounds"][1]["default"] = serde_json::json!("not-a-route");
         assert_eq!(wsl_egress_input(&c).unwrap_err(), "WSL_ROUTE_UNKNOWN");
+    }
+    #[test]
+    fn four_native_https_probes_cannot_prove_line1_exit_ip() {
+        let ok = egress::Proof {
+            verdict: egress::Verdict::Pass,
+            reason: "DIRECT_PUBLIC_IP_CONFIRMED",
+        };
+        let fail = egress::Proof {
+            verdict: egress::Verdict::Failed,
+            reason: "DIRECT_IP_MISMATCH",
+        };
+        let unavailable = egress::Proof {
+            verdict: egress::Verdict::Unknown,
+            reason: "HTTPS_DEADLINE_OR_TIMEOUT",
+        };
+        assert_eq!(
+            line1_reason(&ok, true),
+            "LINE1_FOUR_HTTPS_PROTOCOL_PASS_IP_NOT_CHECKED"
+        );
+        assert_eq!(line1_reason(&ok, false), "LINE1_HTTPS_PROTOCOL_INCOMPLETE");
+        assert_eq!(line1_reason(&fail, true), "DIRECT_IP_MISMATCH");
+        assert_eq!(
+            line1_reason(&unavailable, true),
+            "HTTPS_DEADLINE_OR_TIMEOUT"
+        );
     }
     #[test]
     fn read_only_unknown_remote() {
