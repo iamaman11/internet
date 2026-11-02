@@ -24,7 +24,7 @@ jobs:
       - name: Rust lint
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Python credential renderer dependencies
-        run: python3 -m pip install --break-system-packages cryptography==43.0.3
+        run: python3 -m pip install 'cryptography==43.0.3'
       - name: Python renderer tests (ephemeral fake credentials)
         run: python3 -m unittest discover -s windows/tests -p 'test_*.py' -v
       - name: Native pinned sing-box configuration validation
@@ -85,6 +85,10 @@ jobs:
           New-Item -ItemType Directory -Path 'release-candidate' -Force | Out-Null
           Copy-Item -LiteralPath $pkg -Destination 'release-candidate/internet-windows-x64.zip'
           Copy-Item -LiteralPath 'windows/install.ps1' -Destination 'release-candidate/install.ps1'
+      - name: Native installer negative tests on disposable CI host
+        shell: pwsh
+        run: |
+          ./windows/tests/check_installer.ps1 -PackagePath (Join-Path $env:RUNNER_TEMP 'internet-windows-x64.zip')
       - uses: actions/upload-artifact@v4
         with:
           name: internet-s2-windows-candidate

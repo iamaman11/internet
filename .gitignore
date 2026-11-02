@@ -5,3 +5,6 @@
 /desktop-runtime/
 /windows/config/
 /windows/state/
+
+**/__pycache__/
+*.pyc

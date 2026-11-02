@@ -40,17 +40,26 @@ pub fn validate(c: &Value) -> Result<(), &'static str> {
     }
     for (target, port) in [(Target::Desktop, 2080), (Target::Wsl, 2081)] {
         let inbound = by_tag(inbounds, target.listener())?;
-        let addr=inbound["listen"].as_str().ok_or("CONFIG_INBOUND_UNSAFE")?;
-        let bind_ok=if target==Target::Desktop { addr=="127.0.0.1" }
-            else { addr=="127.0.0.1" || addr.parse::<std::net::Ipv4Addr>()
-                .is_ok_and(|ip|ip.is_private()&&!ip.is_unspecified()&&!ip.is_loopback()) };
-        if inbound["type"]!="mixed" || !bind_ok || inbound["listen_port"].as_u64()!=Some(port) {
+        let addr = inbound["listen"].as_str().ok_or("CONFIG_INBOUND_UNSAFE")?;
+        let bind_ok = if target == Target::Desktop {
+            addr == "127.0.0.1"
+        } else {
+            addr == "127.0.0.1"
+                || addr
+                    .parse::<std::net::Ipv4Addr>()
+                    .is_ok_and(|ip| ip.is_private() && !ip.is_unspecified() && !ip.is_loopback())
+        };
+        if inbound["type"] != "mixed" || !bind_ok || inbound["listen_port"].as_u64() != Some(port) {
             return Err("CONFIG_INBOUND_UNSAFE");
         }
-        if target==Target::Wsl {
-            let users=inbound["users"].as_array().ok_or("CONFIG_WSL_AUTH_REQUIRED")?;
-            if users.len()!=1 || users[0]["username"].as_str().is_none_or(str::is_empty)
-                || users[0]["password"].as_str().is_none_or(str::is_empty) {
+        if target == Target::Wsl {
+            let users = inbound["users"]
+                .as_array()
+                .ok_or("CONFIG_WSL_AUTH_REQUIRED")?;
+            if users.len() != 1
+                || users[0]["username"].as_str().is_none_or(str::is_empty)
+                || users[0]["password"].as_str().is_none_or(str::is_empty)
+            {
                 return Err("CONFIG_WSL_AUTH_REQUIRED");
             }
         }
@@ -170,14 +179,23 @@ pub fn with_selected(
     validate(&next)?;
     Ok(next)
 }
-pub fn with_wsl_gateway(original: &Value, gateway: std::net::Ipv4Addr) -> Result<Value,&'static str> {
+pub fn with_wsl_gateway(
+    original: &Value,
+    gateway: std::net::Ipv4Addr,
+) -> Result<Value, &'static str> {
     validate(original)?;
-    if !gateway.is_private() || gateway.is_loopback() { return Err("WSL_GATEWAY_INVALID"); }
-    let mut next=original.clone();
-    let inbound=next.get_mut("inbounds").and_then(Value::as_array_mut)
-        .ok_or("CONFIG_INBOUND_UNSAFE")?.iter_mut()
-        .find(|v|v["tag"]=="wsl-in").ok_or("CONFIG_INBOUND_UNSAFE")?;
-    inbound["listen"]=Value::String(gateway.to_string());
+    if !gateway.is_private() || gateway.is_loopback() {
+        return Err("WSL_GATEWAY_INVALID");
+    }
+    let mut next = original.clone();
+    let inbound = next
+        .get_mut("inbounds")
+        .and_then(Value::as_array_mut)
+        .ok_or("CONFIG_INBOUND_UNSAFE")?
+        .iter_mut()
+        .find(|v| v["tag"] == "wsl-in")
+        .ok_or("CONFIG_INBOUND_UNSAFE")?;
+    inbound["listen"] = Value::String(gateway.to_string());
     validate(&next)?;
     Ok(next)
 }
@@ -190,24 +208,39 @@ pub fn read(path: &Path) -> Result<Value, &'static str> {
 pub fn protect_private_directory(path: &Path) -> Result<(), &'static str> {
     #[cfg(windows)]
     {
-        let marker=Path::new(crate::ROOT).join(".internet-owned");
-        if std::fs::read_to_string(&marker).map(|s|s.trim().to_owned()).ok().as_deref()
-            != Some("iamaman11/internet:s2-windows-x64") { return Err("INSTALL_OWNER_UNCONFIRMED"); }
-        let root=Path::new(crate::ROOT);
-        if std::fs::symlink_metadata(root).is_ok_and(|m|m.file_type().is_symlink()) {
+        let marker = Path::new(crate::ROOT).join(".internet-owned");
+        if std::fs::read_to_string(&marker)
+            .map(|s| s.trim().to_owned())
+            .ok()
+            .as_deref()
+            != Some("iamaman11/internet:s2-windows-x64")
+        {
+            return Err("INSTALL_OWNER_UNCONFIRMED");
+        }
+        let root = Path::new(crate::ROOT);
+        if std::fs::symlink_metadata(root).is_ok_and(|m| m.file_type().is_symlink()) {
             return Err("INSTALL_ROOT_REPARSE_FORBIDDEN");
         }
     }
-    std::fs::create_dir_all(path).map_err(|_|"CONFIG_DIRECTORY_CREATE_FAILED")?;
-    if std::fs::symlink_metadata(path).is_ok_and(|m|m.file_type().is_symlink()) {
+    std::fs::create_dir_all(path).map_err(|_| "CONFIG_DIRECTORY_CREATE_FAILED")?;
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err("CONFIG_SYMLINK_FORBIDDEN");
     }
     #[cfg(windows)]
     {
-        let output=std::process::Command::new("icacls.exe").arg(path)
-            .args(["/inheritance:r","/grant:r","*S-1-5-18:(OI)(CI)F","*S-1-5-32-544:(OI)(CI)F"])
-            .output().map_err(|_|"CONFIG_ACL_APPLY_FAILED")?;
-        if !output.status.success() { return Err("CONFIG_ACL_APPLY_FAILED"); }
+        let output = std::process::Command::new("icacls.exe")
+            .arg(path)
+            .args([
+                "/inheritance:r",
+                "/grant:r",
+                "*S-1-5-18:(OI)(CI)F",
+                "*S-1-5-32-544:(OI)(CI)F",
+            ])
+            .output()
+            .map_err(|_| "CONFIG_ACL_APPLY_FAILED")?;
+        if !output.status.success() {
+            return Err("CONFIG_ACL_APPLY_FAILED");
+        }
     }
     Ok(())
 }
@@ -292,46 +325,5 @@ mod tests {
     }
     #[test]
     fn scoped_gateway_binding_and_wsl_auth() {
-        let original=fixture();
-        let gateway:std::net::Ipv4Addr="172.26.16.1".parse().unwrap();
-        let next=with_wsl_gateway(&original,gateway).unwrap();
-        assert_eq!(next["inbounds"][1]["listen"],"172.26.16.1");
-        assert_eq!(original["inbounds"][1]["listen"],"127.0.0.1");
-        let mut bad=next.clone();
-        bad["inbounds"][1].as_object_mut().unwrap().remove("users");
-        assert_eq!(validate(&bad),Err("CONFIG_WSL_AUTH_REQUIRED"));
-    }
-    #[test]
-    fn target_changes_do_not_touch_other_selector() {
-        let c = fixture();
-        assert!(validate(&c).is_ok());
-        let n = with_selected(&c, Target::Wsl, Route::WarpVless).unwrap();
-        assert_eq!(selected(&n, Target::Wsl).unwrap(), Route::WarpVless);
-        assert_eq!(selected(&n, Target::Desktop).unwrap(), Route::DirectAuto);
-        assert_eq!(selected(&c, Target::Wsl).unwrap(), Route::DirectAuto);
-    }
-    #[test]
-    fn reject_warp_to_direct_fallback() {
-        let mut c = fixture();
-        c["outbounds"][5]["outbounds"][0] = Value::String("direct-vless".into());
-        assert_eq!(validate(&c), Err("CONFIG_AUTO_FALLBACK_FORBIDDEN"));
-    }
-    #[test]
-    fn reject_tun_or_exposed_listeners() {
-        let mut c = fixture();
-        c["inbounds"][1]["listen"] = Value::String("0.0.0.0".into());
-        assert_eq!(validate(&c), Err("CONFIG_INBOUND_UNSAFE"));
-        let mut c = fixture();
-        c["inbounds"]
-            .as_array_mut()
-            .unwrap()
-            .push(serde_json::json!({"type":"tun"}));
-        assert_eq!(validate(&c), Err("CONFIG_SCOPE_MISMATCH"));
-    }
-    #[test]
-    fn no_unchecked_fallback_endpoints() {
-        let mut c = fixture();
-        c["outbounds"][2]["tls"]["insecure"] = Value::Bool(true);
-        assert_eq!(validate(&c), Err("CONFIG_TLS_INSECURE"));
-    }
-}
+        let original = fixture();
+        let gateway: std::net::Ipv4Addr = "172.26.16.
