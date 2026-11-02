@@ -258,7 +258,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
 }
 fn menu() -> i32 {
     println!(
-        "INTERNET — Windows/WSL\n1 Status   2 Diagnose   3 Start   4 Stop   5 Desktop route   6 WSL route   0 Exit"
+        "INTERNET — Windows/WSL\n1 Status   2 Diagnose   3 Start   4 Stop   5 Desktop route   6 WSL route\n7 TUN status   8 Selected Apps status   9 Selected Apps ON/OFF   10 Add app   11 Remove app   0 Exit"
     );
     let mut line = String::new();
     if io::stdin().read_line(&mut line).is_err() {
@@ -271,6 +271,11 @@ fn menu() -> i32 {
         "4" => vec!["stop".into()],
         "5" => vec!["route".into()],
         "6" => vec!["wsl".into(), "route".into()],
+        "7" => vec!["tun".into(), "status".into()],
+        "8" => vec!["selected-apps".into(), "status".into()],
+        "9" => vec!["selected-apps".into()],
+        "10" => vec!["selected-apps".into(), "add".into()],
+        "11" => vec!["selected-apps".into(), "remove".into()],
         "0" => return 0,
         _ => return 1,
     };
@@ -282,6 +287,12 @@ fn menu() -> i32 {
         if io::stdin().read_line(&mut choice).is_err() {
             return 1;
         }
+        args.push(choice.trim().to_owned());
+    }
+    if ["9", "10", "11"].contains(&line.trim()) {
+        println!("{}", if line.trim() == "9" { "Selected Apps: on | off" } else { "Executable name or absolute path:" });
+        let mut choice = String::new();
+        if io::stdin().read_line(&mut choice).is_err() { return 1; }
         args.push(choice.trim().to_owned());
     }
     execute(&args, false)
