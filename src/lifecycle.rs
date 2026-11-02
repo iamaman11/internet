@@ -1,4 +1,5 @@
 //! Task Scheduler is the single native lifecycle owner. No daemon/supervisor.
+#[cfg(windows)]
 use crate::{config, TASK};
 use std::path::Path;
 
@@ -14,7 +15,8 @@ pub fn xml() -> String {
 }
 pub fn task_owned(receipt: &str) -> bool {
     receipt.contains(&format!("<Command>{}\\sing-box.exe</Command>",crate::ROOT))
-        && receipt.contains(&format!("run -c &quot;{}\\config\\sing-box.json&quot;",crate::ROOT))
+        && (receipt.contains(&format!("run -c &quot;{}\\config\\sing-box.json&quot;",crate::ROOT))
+            || receipt.contains(&format!(r#"run -c "{}\config\sing-box.json""#,crate::ROOT)))
         && receipt.contains("<UserId>S-1-5-18</UserId>")
         && receipt.matches("<Exec>").count() == 1
 }

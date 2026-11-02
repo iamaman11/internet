@@ -21,7 +21,7 @@ pub fn validate(c: &Value) -> Result<(), &'static str> {
     let inbounds = array(c, "inbounds")?;
     let outbounds = array(c, "outbounds")?;
     let rules = c.pointer("/route/rules").and_then(Value::as_array).ok_or("CONFIG_ROUTE_RULES_MISSING")?;
-    if inbounds.len() != 2 || outbounds.len() != 8 { return Err("CONFIG_SCOPE_MISMATCH"); }
+    if inbounds.len() != 2 || outbounds.len() != 8 || rules.len() != 2 { return Err("CONFIG_SCOPE_MISMATCH"); }
     for (target, port) in [(Target::Desktop, 2080), (Target::Wsl, 2081)] {
         let inbound = by_tag(inbounds, target.listener())?;
         if inbound["type"] != "mixed" || inbound["listen"] != "127.0.0.1"
