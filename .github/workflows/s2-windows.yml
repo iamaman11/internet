@@ -3,6 +3,13 @@ name: S2 Windows candidate
 # One final run per completed S2 slice, never deploy from CI.
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Cargo.*'
+      - 'src/**'
+      - 'windows/**'
+      - '.github/workflows/s2-windows.yml'
 
 permissions:
   contents: read
