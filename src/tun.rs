@@ -481,31 +481,102 @@ pub fn list_change(current: &Settings, add: bool, name: &str) -> Result<Settings
     Ok(next)
 }
 
-/// One-operation Edge routing. Exact image path prevents a different
-/// executable named msedge.exe from silently inheriting browser routing.
-fn edge_path() -> Result<String, &'static str> {
+/// No per-application registry: full paths are exact; short EXE names
+/// resolve only against the Windows process table. Never guess a path.
+fn executable_leaf(value: &str) -> &str {
+    value.rsplit('\\').next().unwrap_or(value)
+}
+fn running_paths(name: &str) -> Result<Vec<String>, &'static str> {
     if !cfg!(windows) {
         return Err("WINDOWS_ONLY");
     }
-    for path in [
-        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-    ] {
-        if Path::new(path).is_file() {
-            return application(path);
+    let validated = application(name)?;
+    if validated.contains('\\') {
+        return Err("APP_NAME_EXPECTED");
+    }
+    let script = format!(
+        r#"[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $ErrorActionPreference='Stop'; @(Get-CimInstance Win32_Process -Filter "Name='{validated}'" | Where-Object {{ $_.ExecutablePath }} | Select-Object -ExpandProperty ExecutablePath -Unique) | ForEach-Object {{ [Console]::WriteLine($_) }}"#
+    );
+    let result = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .map_err(|_| "APP_PROCESS_QUERY_FAILED")?;
+    if !result.status.success() {
+        return Err("APP_PROCESS_QUERY_FAILED");
+    }
+    let text = String::from_utf8(result.stdout).map_err(|_| "APP_PROCESS_QUERY_FAILED")?;
+    let mut paths = Vec::new();
+    for line in text.lines().map(str::trim).filter(|s| !s.is_empty()) {
+        let path = application(line)?;
+        if !path.contains('\\') || executable_leaf(&path) != validated {
+            return Err("APP_PROCESS_PATH_UNTRUSTED");
+        }
+        if !paths.contains(&path) {
+            paths.push(path);
         }
     }
-    Err("EDGE_EXECUTABLE_NOT_FOUND")
+    paths.sort();
+    Ok(paths)
 }
-fn edge_transition(old: &Settings, vm: bool, exact: &str) -> Result<Settings, &'static str> {
+fn resolve_application(
+    raw: &str,
+    old: &Settings,
+    for_vm: bool,
+    observed: Option<&[String]>,
+) -> Result<(String, &'static str), &'static str> {
+    let name = application(raw)?;
+    if name.contains('\\') {
+        if for_vm && !Path::new(raw).is_file() {
+            return Err("APP_EXECUTABLE_NOT_FOUND");
+        }
+        return Ok((name, "EXPLICIT_EXACT_PATH"));
+    }
+    let running = match observed {
+        Some(paths) => paths.to_vec(),
+        None => running_paths(&name)?,
+    };
+    let mut unique = Vec::new();
+    for candidate in running {
+        let path = application(&candidate)?;
+        if !path.contains('\\') || executable_leaf(&path) != name {
+            return Err("APP_PROCESS_PATH_UNTRUSTED");
+        }
+        if !unique.contains(&path) {
+            unique.push(path);
+        }
+    }
+    if unique.len() > 1 {
+        return Err("APP_EXECUTABLE_AMBIGUOUS_USE_PATH");
+    }
+    if let Some(path) = unique.pop() {
+        if for_vm && observed.is_none() && !Path::new(&path).is_file() {
+            return Err("APP_EXECUTABLE_NOT_FOUND");
+        }
+        return Ok((path, "RUNNING_PROCESS_EXACT_PATH"));
+    }
+    if for_vm {
+        return Err("APP_NOT_RUNNING_USE_FULL_PATH");
+    }
+    let stored: Vec<_> = old
+        .applications
+        .iter()
+        .filter(|s| executable_leaf(s) == name)
+        .cloned()
+        .collect();
+    if stored.len() > 1 {
+        return Err("APP_EXECUTABLE_AMBIGUOUS_USE_PATH");
+    }
+    match stored.into_iter().next() {
+        Some(value) => Ok((value, "SAVED_STATE_NOT_RUNNING")),
+        None => Err("APP_NOT_RUNNING_USE_FULL_PATH"),
+    }
+}
+fn app_transition(old: &Settings, vm: bool, target: &str) -> Result<Settings, &'static str> {
     validate(old)?;
-    // Starting a global TUN must remain a separate explicit action.
     if vm && !old.managed_tun {
         return Err("APP_TUN_OFF_ENABLE_EXPLICITLY");
     }
     if old.managed_tun && !old.selected_apps {
-        // Edge is already using VM with all other applications. Do not
-        // silently reroute those other applications to DIRECT.
         return if vm {
             Ok(old.clone())
         } else {
@@ -513,64 +584,82 @@ fn edge_transition(old: &Settings, vm: bool, exact: &str) -> Result<Settings, &'
         };
     }
     let mut next = old.clone();
-    next.applications
-        .retain(|a| a != "msedge.exe" && a != exact);
+    let leaf = executable_leaf(target);
+    next.applications.retain(|a| a != target && a != leaf);
     if vm {
-        next.applications.push(exact.to_owned());
+        if next.applications.len() >= 32 {
+            return Err("APPLICATION_LIST_TOO_LARGE");
+        }
+        next.applications.push(target.to_owned());
         next.applications.sort();
     }
     validate(&next)?;
     Ok(next)
 }
-pub fn app_set_edge(vm: bool) -> Result<Value, &'static str> {
-    let exact = edge_path()?;
+pub fn app_set(raw: &str, vm: bool) -> Result<Value, &'static str> {
+    if !cfg!(windows) {
+        return Err("WINDOWS_ONLY");
+    }
     let old = read_at(&path())?;
-    let next = edge_transition(&old, vm, &exact)?;
+    if vm && !old.managed_tun {
+        return Err("APP_TUN_OFF_ENABLE_EXPLICITLY");
+    }
+    if old.managed_tun && !old.selected_apps {
+        if !vm {
+            return Err("APP_DIRECT_REQUIRES_SELECTED_APPS");
+        }
+        return Ok(json!({"ok":true,"changed":false,
+            "mode":"ALL_APPLICATIONS_VIA_VM","next_action":"internet app list"}));
+    }
+    let (exact, source) = resolve_application(raw, &old, vm, None)?;
+    let next = app_transition(&old, vm, &exact)?;
     let mut result = persist(&path(), &old, &next)?;
-    result["application"] = json!("edge");
-    result["executable"] = json!(exact);
+    result["application"] = json!(exact);
+    result["identity_source"] = json!(source);
     result["desired_route"] = json!(if vm { "VM" } else { "DIRECT" });
     result["scope"] = json!(if !next.managed_tun {
         "TUN_OFF"
-    } else if !next.selected_apps {
-        "ALL_APPLICATIONS_VIA_VM"
     } else {
         "SELECTED_APPLICATIONS"
     });
     Ok(result)
 }
 pub fn app_list() -> Result<Value, &'static str> {
-    let mut current = status()?;
-    current["ok"] = json!(true);
-    current["source"] = json!("native sing-box + config/tun.json");
-    current["egress"] = json!("NOT_TESTED_BY_STATUS");
-    Ok(current)
+    let mut value = status()?;
+    value["ok"] = json!(true);
+    value["source"] = json!("native sing-box + config/tun.json");
+    value["egress"] = json!("NOT_TESTED_BY_STATUS");
+    Ok(value)
 }
-pub fn app_diagnose_edge() -> Result<Value, &'static str> {
-    let exact = edge_path()?;
-    let s = read_at(&path())?;
+pub fn app_diagnose(raw: &str) -> Result<Value, &'static str> {
+    if !cfg!(windows) {
+        return Err("WINDOWS_ONLY");
+    }
+    let state = read_at(&path())?;
+    let (exact, source) = resolve_application(raw, &state, false, None)?;
     let native = config::read(&config::installed())?;
     let configured = native["inbounds"].as_array().is_some_and(|a| a.len() == 3);
-    if s.managed_tun != configured {
+    if state.managed_tun != configured {
         return Err("TUN_DESIRED_NATIVE_DRIFT");
     }
-    if s.managed_tun && s.selected_apps && hot_native(&native) {
-        hot_readback(&s)?;
+    if state.managed_tun && state.selected_apps && hot_native(&native) {
+        hot_readback(&state)?;
     }
-    let selected = s
+    let selected = state
         .applications
         .iter()
-        .any(|a| a == &exact || a == "msedge.exe");
-    Ok(json!({"ok":true,"app":"edge","executable":exact,
-        "desired_route":if s.managed_tun && !s.selected_apps {"VM_ALL_APPLICATIONS"}
-            else if s.managed_tun && selected {"VM"}
-            else {"DIRECT"},
-        "managed_tun":s.managed_tun,"selected_apps":s.selected_apps,
+        .any(|a| a == &exact || a == executable_leaf(&exact));
+    Ok(
+        json!({"ok":true,"application":exact,"identity_source":source,
+        "desired_route":if state.managed_tun && !state.selected_apps {"VM_ALL_APPLICATIONS"}
+            else if state.managed_tun && selected {"VM"} else {"DIRECT"},
+        "managed_tun":state.managed_tun,"selected_apps":state.selected_apps,
         "rule_format":if configured && hot_native(&native) {"native_hot_rule_set"}
-            else if configured && s.selected_apps {"legacy_process_name"} else {"inactive"},
+            else if configured && state.selected_apps {"legacy_process_name"} else {"inactive"},
         "native_state":"CONFIG_AND_FILE_READBACK_ONLY",
         "physical_egress":"NOT_TESTED_BY_STATUS",
-        "next_action":"Verify Edge HTTPS IP and independent DIRECT egress"}))
+        "next_action":"Independently verify real application HTTPS egress"}),
+    )
 }
 
 #[cfg(windows)]
@@ -962,33 +1051,88 @@ mod tests {
         assert!(!hot_native(&other));
     }
     #[test]
-    fn edge_route_does_not_start_tun_or_reroute_other_applications() {
-        let edge = r"c:\program files (x86)\microsoft\edge\application\msedge.exe";
-        let inactive = list_change(&Settings::default(), true, "firefox.exe").unwrap();
+    fn generic_apps_do_not_change_global_tun_or_other_applications() {
+        let browser = r"c:\program files\browser\browser.exe";
+        let editor = r"c:\tools\editor.exe";
+        let inactive = list_change(&Settings::default(), true, "another.exe").unwrap();
         assert_eq!(
-            edge_transition(&inactive, true, edge),
+            app_transition(&inactive, true, browser),
             Err("APP_TUN_OFF_ENABLE_EXPLICITLY")
         );
-        assert_eq!(inactive.applications, ["firefox.exe"]);
-        let all_apps = toggle_state(&inactive, Switch::ManagedTun, true).unwrap();
-        assert_eq!(edge_transition(&all_apps, true, edge), Ok(all_apps.clone()));
+        let all = toggle_state(&inactive, Switch::ManagedTun, true).unwrap();
+        assert_eq!(app_transition(&all, true, browser), Ok(all.clone()));
         assert_eq!(
-            edge_transition(&all_apps, false, edge),
+            app_transition(&all, false, browser),
             Err("APP_DIRECT_REQUIRES_SELECTED_APPS")
         );
-        let selected = toggle_state(&all_apps, Switch::SelectedApps, true).unwrap();
-        let added = edge_transition(&selected, true, edge).unwrap();
-        assert!(added.applications.contains(&"firefox.exe".to_owned()));
-        assert!(added.applications.contains(&edge.to_owned()));
-        assert!(!added.applications.contains(&"msedge.exe".to_owned()));
-        let removed = edge_transition(&added, false, edge).unwrap();
-        assert_eq!(removed.applications, ["firefox.exe"]);
-        let last = list_change(&Settings::default(), true, "msedge.exe").unwrap();
+        let selected = toggle_state(&all, Switch::SelectedApps, true).unwrap();
+        let added = app_transition(&selected, true, browser).unwrap();
+        let added = app_transition(&added, true, editor).unwrap();
+        assert_eq!(added.applications, ["another.exe", browser, editor]);
+        let removed = app_transition(&added, false, editor).unwrap();
+        assert_eq!(removed.applications, ["another.exe", browser]);
+        let last = list_change(&Settings::default(), true, "browser.exe").unwrap();
         let last = toggle_state(&last, Switch::SelectedApps, true).unwrap();
         let last = toggle_state(&last, Switch::ManagedTun, true).unwrap();
-        let cleared = edge_transition(&last, false, edge).unwrap();
+        let cleared = app_transition(&last, false, browser).unwrap();
         assert!(cleared.applications.is_empty());
-        assert!(cleared.selected_apps && cleared.managed_tun);
+        assert!(cleared.managed_tun && cleared.selected_apps);
+    }
+    #[test]
+    fn generic_name_resolution_refuses_ambiguous_or_unverifiable_identity() {
+        let saved = list_change(&Settings::default(), true, "browser.exe").unwrap();
+        let browser = r"c:\program files\browser\browser.exe".to_owned();
+        let portable = r"d:\portable\browser.exe".to_owned();
+        assert_eq!(
+            resolve_application(
+                "browser.exe",
+                &saved,
+                true,
+                Some(std::slice::from_ref(&browser))
+            ),
+            Ok((browser.clone(), "RUNNING_PROCESS_EXACT_PATH"))
+        );
+        assert_eq!(
+            resolve_application("browser.exe", &saved, true, Some(&[])),
+            Err("APP_NOT_RUNNING_USE_FULL_PATH")
+        );
+        assert_eq!(
+            resolve_application("browser.exe", &saved, false, Some(&[])),
+            Ok(("browser.exe".to_owned(), "SAVED_STATE_NOT_RUNNING"))
+        );
+        assert_eq!(
+            resolve_application(
+                "browser.exe",
+                &saved,
+                false,
+                Some(&[browser.clone(), portable.clone()])
+            ),
+            Err("APP_EXECUTABLE_AMBIGUOUS_USE_PATH")
+        );
+        assert_eq!(
+            resolve_application(
+                "browser.exe",
+                &saved,
+                true,
+                Some(&[r"c:\evil\ssh.exe".to_owned()])
+            ),
+            Err("APPLICATION_CONTROL_PROCESS_FORBIDDEN")
+        );
+        assert_eq!(
+            resolve_application(
+                "browser.exe",
+                &saved,
+                false,
+                Some(&["browser.exe".to_owned()])
+            ),
+            Err("APP_PROCESS_PATH_UNTRUSTED")
+        );
+        let mut two = saved;
+        two.applications = vec![browser, portable];
+        assert_eq!(
+            resolve_application("browser.exe", &two, false, Some(&[])),
+            Err("APP_EXECUTABLE_AMBIGUOUS_USE_PATH")
+        );
     }
     #[test]
     fn saved_state_is_atomic_and_invalid_or_interrupted_data_is_not_assumed_off() {
