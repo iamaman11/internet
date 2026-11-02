@@ -25,6 +25,7 @@ class RenderTest(unittest.TestCase):
                          ["direct-hysteria2", "direct-vless"])
         self.assertNotIn("type", config.get("tun", {}))
         self.assertEqual(config["inbounds"][1]["listen"], "127.0.0.1")
+        self.assertEqual(config["inbounds"][1]["users"][0]["username"], self.auth["proxy_user"])
 
     def test_different_modes_really_use_different_credentials(self):
         c = build(self.auth)

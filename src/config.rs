@@ -168,13 +168,37 @@ pub fn read(path: &Path) -> Result<Value, &'static str> {
     validate(&parsed)?;
     Ok(parsed)
 }
+pub fn protect_private_directory(path: &Path) -> Result<(), &'static str> {
+    #[cfg(windows)]
+    {
+        let marker=Path::new(crate::ROOT).join(".internet-owned");
+        if std::fs::read_to_string(&marker).map(|s|s.trim().to_owned()).ok().as_deref()
+            != Some("iamaman11/internet:s2-windows-x64") { return Err("INSTALL_OWNER_UNCONFIRMED"); }
+        let root=Path::new(crate::ROOT);
+        if std::fs::symlink_metadata(root).is_ok_and(|m|m.file_type().is_symlink()) {
+            return Err("INSTALL_ROOT_REPARSE_FORBIDDEN");
+        }
+    }
+    std::fs::create_dir_all(path).map_err(|_|"CONFIG_DIRECTORY_CREATE_FAILED")?;
+    if std::fs::symlink_metadata(path).is_ok_and(|m|m.file_type().is_symlink()) {
+        return Err("CONFIG_SYMLINK_FORBIDDEN");
+    }
+    #[cfg(windows)]
+    {
+        let output=std::process::Command::new("icacls.exe").arg(path)
+            .args(["/inheritance:r","/grant:r","*S-1-5-18:(OI)(CI)F","*S-1-5-32-544:(OI)(CI)F"])
+            .output().map_err(|_|"CONFIG_ACL_APPLY_FAILED")?;
+        if !output.status.success() { return Err("CONFIG_ACL_APPLY_FAILED"); }
+    }
+    Ok(())
+}
 pub fn write_checked(path: &Path, c: &Value) -> Result<(), &'static str> {
     validate(c)?;
     let dir = path.parent().ok_or("CONFIG_PATH_INVALID")?;
     if fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err("CONFIG_SYMLINK_FORBIDDEN");
     }
-    fs::create_dir_all(dir).map_err(|_| "CONFIG_DIRECTORY_CREATE_FAILED")?;
+    protect_private_directory(dir)?;
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err("CONFIG_SYMLINK_FORBIDDEN");
     }

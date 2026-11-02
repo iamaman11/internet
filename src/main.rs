@@ -76,7 +76,7 @@ fn configure_stdin() -> Result<Value, &'static str> {
     config::validate(&c)?;
     let path = config::installed();
     let dir = path.parent().ok_or("CONFIG_PATH_INVALID")?;
-    fs::create_dir_all(dir).map_err(|_| "CONFIG_DIRECTORY_CREATE_FAILED")?;
+    config::protect_private_directory(dir)?;
     let temporary = dir.join("sing-box.check.json");
     {
         let mut file = fs::OpenOptions::new()

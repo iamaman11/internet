@@ -36,9 +36,7 @@ Vault folder independently and configure native sing-box, then
 `internet restore <selectors-backup-directory>`, then `internet start`.
 No backup + no Vault means `NOT_CONFIGURED`, not automatic regeneration.
 
-The desktop and WSL listeners are **loopback only** on ports 2080 and 2081.
-WSL-to-Windows loopback must be verified in the actual WSL networking mode;
-an inaccessible WSL listener is **not** a successful WSL physical test.
+Desktop is loopback-only on 2080. The WSL listener is authenticated on port 2081.\nAt explicit \`internet start\`, the native adapter discovers the current WSL NAT\ngateway, binds only that Windows interface, and installs/updates exactly one\napplication-owned inbound firewall rule restricted to the observed WSL IPv4.\nNo other ports, host routes, WARP or control resources are changed. An absent\nWSL instance keeps 2081 on loopback without opening a firewall rule. The\nactual WSL-to-Windows connection is checked separately; a TCP connection alone\ndoes not prove the remote egress.
 No firewall or NAT modification is permitted as a silent workaround.
 
 ## Acceptance boundary

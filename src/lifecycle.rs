@@ -128,8 +128,7 @@ mod native {
     }
     pub fn start() -> Result<(), &'static str> {
         let path = config::installed();
-        let _ = config::read(&path)?;
-        native_check(&path)?;
+        let current = config::read(&path)?;
         if is_running()? {
             if crate::selector::runtime_selected(crate::model::Target::Desktop).is_ok()
                 && crate::selector::runtime_selected(crate::model::Target::Wsl).is_ok()
@@ -138,25 +137,34 @@ mod native {
             }
             return Err("RUNNING_SING_BOX_UNHEALTHY");
         }
-        if other_processes()? {
-            return Err("FOREIGN_SING_BOX_PROCESS");
+        if other_processes()? { return Err("FOREIGN_SING_BOX_PROCESS"); }
+        let network=crate::wsl::discover()?;
+        if let Some(ref net)=network {
+            let updated=config::with_wsl_gateway(&current,net.gateway)?;
+            if updated!=current {
+                let check_path=path.parent().ok_or("CONFIG_PATH_INVALID")?.join("sing-box.wsl-check.json");
+                if check_path.exists() { return Err("CONFIG_CHECK_CONFLICT"); }
+                fs::write(&check_path,serde_json::to_vec(&updated).map_err(|_|"CONFIG_SERIALIZE_FAILED")?)
+                    .map_err(|_|"CONFIG_CHECK_WRITE_FAILED")?;
+                let test=native_check(&check_path);
+                let _=fs::remove_file(&check_path);
+                test?;
+                config::write_checked(&path,&updated)?;
+            }
         }
+        native_check(&path)?;
         ensure_task()?;
-        let o = command("schtasks.exe", &["/Run", "/TN", TASK])?;
-        if !o.status.success() {
-            return Err("TASK_START_REJECTED");
-        }
-        let deadline = Instant::now() + Duration::from_secs(5);
+        if let Some(ref net)=network { crate::wsl::firewall_allow(net)?; }
+        let o=command("schtasks.exe",&["/Run","/TN",TASK])?;
+        if !o.status.success() { return Err("TASK_START_REJECTED"); }
+        let deadline=Instant::now()+Duration::from_secs(5);
         loop {
             if is_running()?
                 && crate::selector::runtime_selected(crate::model::Target::Desktop).is_ok()
-                && crate::selector::runtime_selected(crate::model::Target::Wsl).is_ok()
-            {
+                && crate::selector::runtime_selected(crate::model::Target::Wsl).is_ok() {
                 return Ok(());
             }
-            if Instant::now() >= deadline {
-                return Err("TASK_START_UNVERIFIED");
-            }
+            if Instant::now()>=deadline { return Err("TASK_START_UNVERIFIED"); }
             thread::sleep(Duration::from_millis(200));
         }
     }
@@ -186,6 +194,7 @@ mod native {
 }
 #[cfg(windows)]
 pub use native::{is_running, native_check, restart, start, stop};
+
 
 #[cfg(not(windows))]
 pub fn is_running() -> Result<bool, &'static str> {

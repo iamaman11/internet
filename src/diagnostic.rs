@@ -144,20 +144,43 @@ fn local_selector(id: &str, target: Target, deep: bool) -> Diagnostic {
                     d.next_action = "internet diagnose";
                 }
             }
-            if deep && d.health == Health::Healthy {
-                let port = if target == Target::Desktop {
-                    2080
-                } else {
-                    2081
-                };
-                let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("fixed loopback");
-                if TcpStream::connect_timeout(&addr, Duration::from_millis(700)).is_err() {
-                    d.health = Health::Failed;
-                    d.reason_code = "PROXY_LISTENER_UNREACHABLE";
-                    d.next_action = "internet inspect windows/sing-box";
+            if target == Target::Wsl && d.health == Health::Healthy {
+                // A selector readback from Windows is NOT a WSL connectivity proof.
+                d.health=Health::Unknown;
+                d.reason_code="WSL_CHANNEL_NOT_TESTED";
+                d.next_action="internet diagnose windows/wsl-selector";
+                if deep {
+                    match crate::wsl::discover() {
+                        Ok(Some(n)) => {
+                            let actual=c["inbounds"][1]["listen"].as_str().unwrap_or("");
+                            if actual!=n.gateway.to_string() {
+                                d.health=Health::Failed;
+                                d.reason_code="WSL_BINDING_STALE";
+                                d.next_action="internet restart";
+                            } else if crate::wsl::probe(&n).is_err() {
+                                d.health=Health::Failed;
+                                d.reason_code="WSL_PROXY_UNREACHABLE";
+                                d.next_action="internet inspect windows/wsl-selector";
+                            } else {
+                                d.health=Health::Degraded;
+                                d.reason_code="WSL_TRANSPORT_PASS_EGRESS_NOT_CHECKED";
+                                d.source="wsl-tcp-connect";
+                                d.scope="wsl_transport_only";
+                            }
+                        },
+                        Ok(None) => { d.reason_code="WSL_NOT_INSTALLED"; },
+                        Err(_) => { d.reason_code="WSL_NETWORK_READBACK_UNKNOWN"; }
+                    }
                 }
-                // TCP LISTEN does not prove authenticated external egress.
+            } else if deep && d.health == Health::Healthy {
+                let addr: SocketAddr = "127.0.0.1:2080".parse().expect("fixed loopback");
+                if TcpStream::connect_timeout(&addr, Duration::from_millis(700)).is_err() {
+                    d.health=Health::Failed;
+                    d.reason_code="PROXY_LISTENER_UNREACHABLE";
+                    d.next_action="internet inspect windows/sing-box";
+                }
             }
+            // Even a TCP listener is not authenticated external egress proof.
         }
         Err(_) => {
             d.source = "local-filesystem";

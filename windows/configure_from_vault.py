@@ -80,7 +80,8 @@ def build(auth):
         "dns": {"servers": [{"type": "local", "tag": "local-dns"}], "final": "local-dns"},
         "inbounds": [
             {"type": "mixed", "tag": "desktop-in", "listen": "127.0.0.1", "listen_port": 2080},
-            {"type": "mixed", "tag": "wsl-in", "listen": "127.0.0.1", "listen_port": 2081},
+            {"type": "mixed", "tag": "wsl-in", "listen": "127.0.0.1", "listen_port": 2081,
+             "users": [{"username": auth["proxy_user"], "password": auth["proxy_password"]}]},
         ],
         "outbounds": outbounds,
         "route": {
