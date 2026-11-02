@@ -14,6 +14,74 @@ use std::{
 };
 
 const SCHEMA: &str = "internet-tun-v1";
+const HOT_TAG: &str = "internet-selected-apps";
+const HOT_PATH: &str = r"C:\internet\config\selected-apps.rules.json";
+
+fn rules_path() -> PathBuf {
+    Path::new(crate::ROOT)
+        .join("config")
+        .join("selected-apps.rules.json")
+}
+fn rules_source(state: &Settings) -> Value {
+    let mut names = Vec::new();
+    let mut paths = Vec::new();
+    for app in &state.applications {
+        if app.contains('\\') {
+            paths.push(app.as_str());
+        } else {
+            names.push(app.as_str());
+        }
+    }
+    let mut rules = Vec::new();
+    if !names.is_empty() {
+        rules.push(json!({"process_name":names}));
+    }
+    if !paths.is_empty() {
+        rules.push(json!({"process_path":paths}));
+    }
+    json!({"version":3,"rules":rules})
+}
+fn hot_native(c: &Value) -> bool {
+    c.pointer("/route/rules/2/rule_set") == Some(&json!([HOT_TAG]))
+}
+fn hot_readback(state: &Settings) -> Result<(), &'static str> {
+    let raw = fs::read(rules_path()).map_err(|_| "HOT_RULESET_NOT_FOUND")?;
+    let disk: Value = serde_json::from_slice(&raw).map_err(|_| "HOT_RULESET_INVALID")?;
+    if disk != rules_source(state) {
+        return Err("HOT_RULESET_DRIFT");
+    }
+    Ok(())
+}
+fn write_hot_rules(state: &Settings) -> Result<(), &'static str> {
+    validate(state)?;
+    let path = rules_path();
+    let dir = path.parent().ok_or("HOT_RULESET_PATH_INVALID")?;
+    config::protect_private_directory(dir)?;
+    if fs::symlink_metadata(&path).is_ok_and(|x| !x.is_file() || x.file_type().is_symlink()) {
+        return Err("HOT_RULESET_UNOWNED_FILE");
+    }
+    let pending = path.with_extension("incoming.json");
+    if pending.exists() {
+        return Err("HOT_RULESET_INTERRUPTED");
+    }
+    let bytes = serde_json::to_vec_pretty(&rules_source(state))
+        .map_err(|_| "HOT_RULESET_SERIALIZE_FAILED")?;
+    let result = (|| -> Result<(), &'static str> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pending)
+            .map_err(|_| "HOT_RULESET_CONFLICT")?;
+        file.write_all(&bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|_| "HOT_RULESET_WRITE_FAILED")?;
+        drop(file);
+        fs::rename(&pending, &path).map_err(|_| "HOT_RULESET_REPLACE_FAILED")?;
+        hot_readback(state)
+    })();
+    let _ = fs::remove_file(pending);
+    result
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,9 +172,6 @@ fn validate(s: &Settings) -> Result<(), &'static str> {
         if canonical != *item || !unique.insert(canonical) {
             return Err("APPLICATION_LIST_INVALID");
         }
-    }
-    if s.selected_apps && s.applications.is_empty() {
-        return Err("SELECTED_APPS_EMPTY");
     }
     Ok(())
 }
@@ -207,6 +272,7 @@ pub fn validate_native(c: &Value, on: bool) -> Result<(), &'static str> {
         .ok_or("TUN_RULE_INVALID")?;
     if !on {
         if c.pointer("/route/auto_detect_interface").is_some()
+            || c.pointer("/route/rule_set").is_some()
             || inb.iter().any(|x| x["type"] == "tun")
             || out.iter().any(|x| x["tag"] == "s4-native-direct")
         {
@@ -261,10 +327,28 @@ pub fn validate_native(c: &Value, on: bool) -> Result<(), &'static str> {
         return Err("TUN_ROUTE_UNSAFE");
     }
     if rules.len() == 3 {
-        if rules[2] != json!({"inbound":["windows-tun"],"outbound":"desktop-selector"}) {
+        if c.pointer("/route/rule_set").is_some()
+            || rules[2] != json!({"inbound":["windows-tun"],"outbound":"desktop-selector"})
+        {
             return Err("TUN_ROUTE_UNSAFE");
         }
     } else {
+        if hot_native(c) {
+            if c["route"]["rule_set"]
+                != json!([{"type":"local","tag":HOT_TAG,
+                "format":"source","path":HOT_PATH}])
+                || rules[2]
+                    != json!({"inbound":["windows-tun"],
+                    "rule_set":[HOT_TAG],"outbound":"desktop-selector"})
+                || rules[3] != json!({"inbound":["windows-tun"],"outbound":"s4-native-direct"})
+            {
+                return Err("TUN_HOT_RULESET_INVALID");
+            }
+            return Ok(());
+        }
+        if c.pointer("/route/rule_set").is_some() {
+            return Err("TUN_HOT_RULESET_UNOWNED");
+        }
         if rules[3] != json!({"inbound":["windows-tun"],"outbound":"s4-native-direct"})
             || rules[2]["inbound"] != json!(["windows-tun"])
             || rules[2]["outbound"] != "desktop-selector"
@@ -308,13 +392,11 @@ pub fn render_native(
             .as_object_mut()
             .unwrap()
             .remove("auto_detect_interface");
+        c["route"].as_object_mut().unwrap().remove("rule_set");
     }
     if !selected.managed_tun {
         config::validate(&c)?;
         return Ok(c);
-    }
-    if selected.selected_apps && selected.applications.iter().any(|v| v.contains('\\')) {
-        return Err("TUN_PROCESS_PATH_UNSUPPORTED");
     }
     if control.is_empty() || control.len() > 8 {
         return Err("TUN_CONTROL_NOT_CONNECTED");
@@ -353,8 +435,10 @@ pub fn render_native(
         .unwrap();
     if selected.selected_apps {
         rules.push(json!({"inbound":["windows-tun"],
-            "process_name":selected.applications,"outbound":"desktop-selector"}));
+            "rule_set":[HOT_TAG],"outbound":"desktop-selector"}));
         rules.push(json!({"inbound":["windows-tun"],"outbound":"s4-native-direct"}));
+        c["route"]["rule_set"] = json!([{"type":"local","tag":HOT_TAG,
+            "format":"source","path":HOT_PATH}]);
     } else {
         rules.push(json!({"inbound":["windows-tun"],"outbound":"desktop-selector"}));
     }
@@ -392,12 +476,80 @@ pub fn list_change(current: &Settings, add: bool, name: &str) -> Result<Settings
         next.applications.sort();
     } else {
         next.applications.retain(|a| a != &name);
-        if next.selected_apps && next.applications.is_empty() {
-            return Err("SELECTED_APPS_EMPTY");
-        }
     }
     validate(&next)?;
     Ok(next)
+}
+
+/// One-operation Edge routing. Exact image path prevents a different
+/// executable named msedge.exe from silently inheriting browser routing.
+fn edge_path() -> Result<String, &'static str> {
+    if !cfg!(windows) {
+        return Err("WINDOWS_ONLY");
+    }
+    for path in [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ] {
+        if Path::new(path).is_file() {
+            return application(path);
+        }
+    }
+    Err("EDGE_EXECUTABLE_NOT_FOUND")
+}
+pub fn app_set_edge(vm: bool) -> Result<Value, &'static str> {
+    let exact = edge_path()?;
+    let old = read_at(&path())?;
+    if old.managed_tun && !old.selected_apps && !vm {
+        return Err("APP_DIRECT_REQUIRES_SELECTED_APPS");
+    }
+    let mut next = old.clone();
+    next.applications
+        .retain(|a| a != "msedge.exe" && a != &exact);
+    if vm {
+        next.applications.push(exact.clone());
+        next.applications.sort();
+        next.selected_apps = true;
+    }
+    validate(&next)?;
+    let mut result = persist(&path(), &old, &next)?;
+    result["application"] = json!("edge");
+    result["executable"] = json!(exact);
+    result["desired_route"] = json!(if vm { "VM" } else { "DIRECT" });
+    Ok(result)
+}
+pub fn app_list() -> Result<Value, &'static str> {
+    let mut current = status()?;
+    current["ok"] = json!(true);
+    current["source"] = json!("native sing-box + config/tun.json");
+    current["egress"] = json!("NOT_TESTED_BY_STATUS");
+    Ok(current)
+}
+pub fn app_diagnose_edge() -> Result<Value, &'static str> {
+    let exact = edge_path()?;
+    let s = read_at(&path())?;
+    let native = config::read(&config::installed())?;
+    let configured = native["inbounds"].as_array().is_some_and(|a| a.len() == 3);
+    if s.managed_tun != configured {
+        return Err("TUN_DESIRED_NATIVE_DRIFT");
+    }
+    if s.managed_tun && s.selected_apps && hot_native(&native) {
+        hot_readback(&s)?;
+    }
+    let selected = s
+        .applications
+        .iter()
+        .any(|a| a == &exact || a == "msedge.exe");
+    Ok(json!({"ok":true,"app":"edge","executable":exact,
+        "desired_route":if s.managed_tun && !s.selected_apps {"VM_ALL_APPLICATIONS"}
+            else if s.managed_tun && selected {"VM"}
+            else {"DIRECT"},
+        "managed_tun":s.managed_tun,"selected_apps":s.selected_apps,
+        "rule_format":if configured && hot_native(&native) {"native_hot_rule_set"}
+            else if configured && s.selected_apps {"legacy_process_name"} else {"inactive"},
+        "native_state":"CONFIG_AND_FILE_READBACK_ONLY",
+        "physical_egress":"NOT_TESTED_BY_STATUS",
+        "next_action":"Verify Edge HTTPS IP and independent DIRECT egress"}))
 }
 
 #[cfg(windows)]
@@ -517,6 +669,37 @@ fn persist(path: &Path, old: &Settings, next: &Settings) -> Result<Value, &'stat
             "next_action":"internet tun status"}),
         );
     }
+    // Native sing-box watches this source rule-set itself; no lifecycle mutation.
+    // The file is a derived projection of tun.json, never a second state owner.
+    if configured
+        && old.managed_tun
+        && next.managed_tun
+        && old.selected_apps
+        && next.selected_apps
+        && hot_native(&current)
+    {
+        if !crate::lifecycle::is_running()? {
+            return Err("TUN_TASK_NOT_RUNNING");
+        }
+        hot_readback(old)?;
+        write_hot_rules(next)?;
+        if write_at(path, next).is_err() {
+            let rollback = write_hot_rules(old).and_then(|_| hot_readback(old));
+            return Err(if rollback.is_ok() {
+                "HOT_STATE_WRITE_ROLLED_BACK"
+            } else {
+                "HOT_RULESET_ROLLBACK_UNKNOWN"
+            });
+        }
+        hot_readback(next)?;
+        return Ok(
+            json!({"ok":true,"changed":true,"managed_tun":next.managed_tun,
+            "selected_apps":next.selected_apps,"applications":next.applications,
+            "singbox_restarted":false,"hot_reload":"NATIVE_FILE_WATCHER",
+            "runtime_confirmed":false,"egress":"NOT_TESTED_BY_APPLY",
+            "next_action":"internet app diagnose edge"}),
+        );
+    }
     let needs_restart = configured || old.managed_tun || next.managed_tun;
     if !needs_restart {
         config::protect_private_directory(path.parent().ok_or("TUN_STATE_PATH_INVALID")?)?;
@@ -531,6 +714,9 @@ fn persist(path: &Path, old: &Settings, next: &Settings) -> Result<Value, &'stat
             vec![]
         };
         let updated = render_native(&current, next, &ips)?;
+        if next.managed_tun && next.selected_apps {
+            write_hot_rules(next)?;
+        }
         candidate_check(&updated)?;
         if updated != current {
             if crate::lifecycle::stop().is_err() {
@@ -584,13 +770,18 @@ pub fn status() -> Result<Value, &'static str> {
     let native = config::read(&config::installed())?;
     let configured = native["inbounds"].as_array().is_some_and(|a| a.len() == 3);
     let up = adapter_up()?;
+    if configured && hot_native(&native) {
+        hot_readback(&s)?;
+    }
     Ok(
         json!({"managed_tun":s.managed_tun,"selected_apps":s.selected_apps,
         "applications":s.applications,"native_tun_configured":configured,
         "native_tun_up":up,"desired_native_match":s.managed_tun==configured,
         "kernel_bypass_for_unselected":"UNSUPPORTED",
         "unselected_egress":"native DIRECT when selected-apps on",
-        "physical_egress":"NOT_TESTED_BY_STATUS"}),
+        "physical_egress":"NOT_TESTED_BY_STATUS",
+        "application_rule_mode":if configured && hot_native(&native) {"native_hot_rule_set"}
+            else if configured && s.selected_apps {"legacy_restart_required"} else {"inactive"}}),
     )
 }
 
@@ -642,6 +833,9 @@ pub fn inspect(id: &str) -> Diagnostic {
             d.reason_code = match code {
                 "TUN_STATE_INTERRUPTED" => "TUN_STATE_INTERRUPTED",
                 "TUN_STATE_JSON_INVALID" | "TUN_STATE_SCHEMA_INVALID" => "TUN_STATE_INVALID",
+                "HOT_RULESET_DRIFT" | "HOT_RULESET_NOT_FOUND" | "HOT_RULESET_INVALID" => {
+                    "HOT_RULESET_DRIFT"
+                }
                 _ => "TUN_READBACK_UNKNOWN",
             };
             d.next_action = "internet tun status";
@@ -682,9 +876,11 @@ mod tests {
     #[test]
     fn app_names_paths_protected_processes_and_empty_list() {
         let s = Settings::default();
-        assert_eq!(
-            toggle_state(&s, Switch::SelectedApps, true).unwrap_err(),
-            "SELECTED_APPS_EMPTY"
+        assert!(
+            toggle_state(&s, Switch::SelectedApps, true)
+                .unwrap()
+                .applications
+                .is_empty()
         );
         for v in [
             "",
@@ -716,6 +912,35 @@ mod tests {
     }
 
     #[test]
+    fn hot_native_rule_set_matches_exact_paths_and_process_names() {
+        let s = list_change(&Settings::default(), true, "msedge.exe").unwrap();
+        let s = list_change(
+            &s,
+            true,
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        )
+        .unwrap();
+        let rule = rules_source(&s);
+        assert_eq!(rule["version"], 3);
+        assert_eq!(rule["rules"].as_array().unwrap().len(), 2);
+        assert_eq!(rule["rules"][0]["process_name"], json!(["msedge.exe"]));
+        assert_eq!(
+            rule["rules"][1]["process_path"],
+            json!([r"c:\program files (x86)\microsoft\edge\application\msedge.exe"])
+        );
+        let mut other = s.clone();
+        other.applications.clear();
+        assert_eq!(rules_source(&other)["rules"], json!([]));
+    }
+    #[test]
+    fn hot_rule_set_alias_never_confuses_arbitrary_references() {
+        let c = json!({"route":{"rules":[{}, {}, {"rule_set":[HOT_TAG]}]}});
+        assert!(hot_native(&c));
+        let mut other = c;
+        other["route"]["rules"][2]["rule_set"] = json!(["foreign"]);
+        assert!(!hot_native(&other));
+    }
+    #[test]
     fn saved_state_is_atomic_and_invalid_or_interrupted_data_is_not_assumed_off() {
         let suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -744,9 +969,11 @@ mod tests {
     fn empty_last_entry_and_interrupted_state_fail_closed() {
         let s = list_change(&Settings::default(), true, "firefox.exe").unwrap();
         let s = toggle_state(&s, Switch::SelectedApps, true).unwrap();
-        assert_eq!(
-            list_change(&s, false, "firefox.exe").unwrap_err(),
-            "SELECTED_APPS_EMPTY"
+        assert!(
+            list_change(&s, false, "firefox.exe")
+                .unwrap()
+                .applications
+                .is_empty()
         );
         let mut wrong = s;
         wrong.schema = "v2".into();
