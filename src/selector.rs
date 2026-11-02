@@ -29,23 +29,70 @@ fn native_request_path(
     read_timeout: Duration,
 ) -> Result<Value, &'static str> {
     let address: SocketAddr = "127.0.0.1:9090".parse().expect("fixed loopback");
-    let mut sock = TcpStream::connect_timeout(&address, Duration::from_millis(400))
+    native_request_until(address, method, path, body, Instant::now() + read_timeout)
+}
+
+/// Bound connect, write and the entire response by one monotonic deadline.
+/// Periodic small writes by a peer cannot extend the complete request.
+fn native_request_until(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    deadline: Instant,
+) -> Result<Value, &'static str> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err("SING_BOX_API_DEADLINE_EXCEEDED");
+    }
+    let mut sock = TcpStream::connect_timeout(&address, remaining.min(Duration::from_millis(400)))
         .map_err(|_| "SING_BOX_API_UNREACHABLE")?;
-    sock.set_read_timeout(Some(read_timeout))
-        .map_err(|_| "SING_BOX_API_IO")?;
-    sock.set_write_timeout(Some(Duration::from_secs(2)))
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err("SING_BOX_API_DEADLINE_EXCEEDED");
+    }
+    sock.set_write_timeout(Some(remaining))
         .map_err(|_| "SING_BOX_API_IO")?;
     let data = body.unwrap_or("");
     let request = format!(
         "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{data}",
         data.len()
     );
-    sock.write_all(request.as_bytes())
-        .map_err(|_| "SING_BOX_API_IO")?;
+    sock.write_all(request.as_bytes()).map_err(|_| {
+        if Instant::now() >= deadline {
+            "SING_BOX_API_DEADLINE_EXCEEDED"
+        } else {
+            "SING_BOX_API_IO"
+        }
+    })?;
     let mut response = Vec::new();
-    sock.take(128 * 1024)
-        .read_to_end(&mut response)
-        .map_err(|_| "SING_BOX_API_IO")?;
+    let mut chunk = [0u8; 4096];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("SING_BOX_API_DEADLINE_EXCEEDED");
+        }
+        sock.set_read_timeout(Some(remaining))
+            .map_err(|_| "SING_BOX_API_IO")?;
+        match sock.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(size) => {
+                if response.len() + size > 128 * 1024 {
+                    return Err("SING_BOX_API_REPLY_TOO_LARGE");
+                }
+                response.extend_from_slice(&chunk[..size]);
+            }
+            Err(e) => {
+                let reason = match e.kind() {
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                        "SING_BOX_API_DEADLINE_EXCEEDED"
+                    }
+                    _ => "SING_BOX_API_IO",
+                };
+                return Err(reason);
+            }
+        }
+    }
     let pos = response
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -152,6 +199,70 @@ mod latency_tests {
             serde_json::json!(null),
         ] {
             assert_eq!(parse_delay(&body), Err("LINE1_DELAY_REPLY_INVALID"));
+        }
+    }
+
+    #[test]
+    fn slow_drip_tcp_response_cannot_extend_deadline() {
+        use std::{net::TcpListener, thread};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let mut request = [0u8; 512];
+            let _ = peer.read(&mut request);
+            for _ in 0..20 {
+                if peer.write_all(b"x").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(18));
+            }
+        });
+        let start = Instant::now();
+        let result = native_request_until(
+            address,
+            "GET",
+            "/proxies/direct-vless/delay",
+            None,
+            start + Duration::from_millis(120),
+        );
+        assert_eq!(result, Err("SING_BOX_API_DEADLINE_EXCEEDED"));
+        assert!(start.elapsed() < Duration::from_millis(700));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn local_http_fixture_accepts_valid_and_rejects_invalid_json() {
+        use std::{net::TcpListener, thread};
+        for (reply, expected) in [
+            (
+                "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"delay\":67}",
+                Ok(67),
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nnot-json",
+                Err("SING_BOX_API_REPLY_INVALID"),
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let reply = reply.as_bytes().to_vec();
+            let server = thread::spawn(move || {
+                let (mut peer, _) = listener.accept().unwrap();
+                let mut request = [0u8; 512];
+                let _ = peer.read(&mut request);
+                peer.write_all(&reply).unwrap();
+            });
+            let actual = native_request_until(
+                address,
+                "GET",
+                "/proxies/direct-vless/delay",
+                None,
+                Instant::now() + Duration::from_millis(800),
+            )
+            .and_then(|value| parse_delay(&value));
+            assert_eq!(actual, expected);
+            server.join().unwrap();
         }
     }
 
