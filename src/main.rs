@@ -264,55 +264,66 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
     }
 }
 fn menu() -> i32 {
-    println!(
-        "INTERNET — Windows/WSL\n1 Status   2 Diagnose   3 Start   4 Stop   5 Desktop route   6 WSL route\n7 TUN status   8 Selected Apps status   9 Selected Apps ON/OFF   10 Add app   11 Remove app   12 TUN ON/OFF   0 Exit"
-    );
-    let mut line = String::new();
-    if io::stdin().read_line(&mut line).is_err() {
-        return 1;
-    }
-    let mut args: Vec<String> = match line.trim() {
-        "1" => vec!["status".into()],
-        "2" => vec!["diagnose".into()],
-        "3" => vec!["start".into()],
-        "4" => vec!["stop".into()],
-        "5" => vec!["route".into()],
-        "6" => vec!["wsl".into(), "route".into()],
-        "7" => vec!["tun".into(), "status".into()],
-        "8" => vec!["selected-apps".into(), "status".into()],
-        "9" => vec!["selected-apps".into()],
-        "10" => vec!["selected-apps".into(), "add".into()],
-        "11" => vec!["selected-apps".into(), "remove".into()],
-        "12" => vec!["tun".into()],
-        "0" => return 0,
-        _ => return 1,
-    };
-    if line.trim() == "5" || line.trim() == "6" {
+    // The menu is only an interactive caller of the same typed CLI operations.
+    // No network state lives here; closing the menu never stops sing-box.
+    loop {
         println!(
-            "Route: direct-auto | direct-hysteria2 | direct-vless | warp-auto | warp-hysteria2 | warp-vless"
+            "\nINTERNET — Windows/WSL\n1 Status   2 Diagnose   3 Start   4 Stop   5 Desktop route   6 WSL route\n7 TUN status   8 Selected Apps status   9 Selected Apps ON/OFF   10 Add app   11 Remove app   12 TUN ON/OFF   0 Exit"
         );
-        let mut choice = String::new();
-        if io::stdin().read_line(&mut choice).is_err() {
-            return 1;
+        print!("Choice: ");
+        let _ = io::stdout().flush();
+        let mut line = String::new();
+        match io::stdin().read_line(&mut line) {
+            Ok(0) => return 0,
+            Ok(_) => {}
+            Err(_) => return 1,
         }
-        args.push(choice.trim().to_owned());
-    }
-    if ["9", "10", "11", "12"].contains(&line.trim()) {
-        println!(
-            "{}",
-            if line.trim() == "9" || line.trim() == "12" {
-                "Selected Apps: on | off"
-            } else {
-                "Executable name or absolute path:"
+        let option = line.trim();
+        let mut args: Vec<String> = match option {
+            "1" => vec!["status".into()],
+            "2" => vec!["diagnose".into()],
+            "3" => vec!["start".into()],
+            "4" => vec!["stop".into()],
+            "5" => vec!["route".into()],
+            "6" => vec!["wsl".into(), "route".into()],
+            "7" => vec!["tun".into(), "status".into()],
+            "8" => vec!["selected-apps".into(), "status".into()],
+            "9" => vec!["selected-apps".into()],
+            "10" => vec!["selected-apps".into(), "add".into()],
+            "11" => vec!["selected-apps".into(), "remove".into()],
+            "12" => vec!["tun".into()],
+            "0" => return 0,
+            _ => {
+                println!("Unknown choice. Use 0 to exit.");
+                continue;
             }
-        );
-        let mut choice = String::new();
-        if io::stdin().read_line(&mut choice).is_err() {
-            return 1;
+        };
+        if option == "5" || option == "6" {
+            println!(
+                "Route: direct-auto | direct-hysteria2 | direct-vless | warp-auto | warp-hysteria2 | warp-vless"
+            );
+        } else if option == "9" {
+            println!("Selected Apps: on | off");
+        } else if option == "12" {
+            println!("Managed TUN: on | off");
+        } else if option == "10" || option == "11" {
+            println!("Executable name or absolute path:");
         }
-        args.push(choice.trim().to_owned());
+        if ["5", "6", "9", "10", "11", "12"].contains(&option) {
+            print!("Value: ");
+            let _ = io::stdout().flush();
+            let mut choice = String::new();
+            match io::stdin().read_line(&mut choice) {
+                Ok(0) => return 0,
+                Ok(_) => args.push(choice.trim().to_owned()),
+                Err(_) => return 1,
+            }
+        }
+        let code = execute(&args, false);
+        if code != 0 {
+            println!("Operation exit={code}; network state is not assumed changed.");
+        }
     }
-    execute(&args, false)
 }
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();

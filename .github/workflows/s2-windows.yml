@@ -66,9 +66,13 @@ jobs:
       - name: Verified official sing-box v1.14.2 (never install globally)
         id: singbox
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $r = Invoke-RestMethod -Uri 'https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.14.2'
+          # Prevent the public release read from exhausting anonymous API quota.
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
+          $r = Invoke-RestMethod -Uri 'https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.14.2' -Headers $headers
           $a = @($r.assets | Where-Object { $_.name -ceq 'sing-box-1.14.2-windows-amd64.zip' })
           if ($a.Count -ne 1 -or $a[0].digest -notmatch '^sha256:[a-f0-9]{64}$') {
             throw 'UPSTREAM_ASSET_IDENTITY_NOT_PROVEN'
