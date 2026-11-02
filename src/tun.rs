@@ -414,7 +414,9 @@ mod tests {
     #[test]
     fn saved_state_is_atomic_and_invalid_or_interrupted_data_is_not_assumed_off() {
         let suffix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let dir = std::env::temp_dir().join(format!("internet-s4-{}-{suffix}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
         let file = dir.join("tun.json");
