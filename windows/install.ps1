@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [string]$PackagePath,
-    [string]$ReleaseTag = 'v0.2.0'
+    [string]$ReleaseTag = 'v0.2.1'
 )
 $ErrorActionPreference = 'Stop'
 $root = 'C:\internet'
