@@ -95,8 +95,8 @@ def main():
             ("bad-json", b"{not json", "BACKUP_JSON_INVALID"),
             ("bad-schema", {**original, "schema": "internet-selectors-v1"}, "BACKUP_SCHEMA_INVALID"),
             ("extra-field", {**original, "foreign": True}, "BACKUP_FIELDS_INVALID"),
-            ("forbidden-app", {**original, "tun": {**original["tun"],
-               "applications": ["sing-box.exe"]}}, "BACKUP_TUN_INVALID")
+            ("invalid-app-path", {**original, "tun": {**original["tun"],
+               "applications": ["..\\sing-box.exe"]}}, "BACKUP_TUN_INVALID")
         ]
         for name, value, reason in invalids:
             path = root / name
