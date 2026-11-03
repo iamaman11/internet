@@ -1,4 +1,4 @@
-# S1 only: three dataplane services; Mesh remains deferred (#11).
+# Native Compose owns three production dataplane services plus isolated, opt-in iPhone Mesh (#11).
 # Supply immutable, verified @sha256 images before running.
 name: internet
 
@@ -60,10 +60,40 @@ services:
     networks:
       - edge
 
+
+  # S3: opt-in only, never started during normal 3-service Compose operations.
+  # This one Mesh identity belongs exclusively to the authorized personal
+  # Cloudflare tenant for iPhone; no adoption of pre-existing Mesh nodes.
+  cloudflare-mesh:
+    profiles: ["mobile"]
+    image: cloudflare/mesh@sha256:1c135f07ddac619562f45da5816b25d3ac7663a491c2a065bd83c005007dec5e
+    restart: unless-stopped
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      SRCNAT_ENABLED: "true"
+    # Created only after Vault capture; never commit runtime/mesh-node.env.
+    env_file:
+      - path: ./runtime/mesh-node.env
+        required: true
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.forwarding: "1"
+      net.ipv6.conf.default.forwarding: "1"
+    volumes:
+      - mesh-state:/var/lib/cloudflare-warp
+    networks:
+      - mesh
+
+
 networks:
   edge:
+    driver: bridge
+  mesh:
     driver: bridge
 
 volumes:
   warp-state:
   certificate-state:
+  mesh-state:
