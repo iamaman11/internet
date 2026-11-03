@@ -119,7 +119,8 @@ class TopologyTests(unittest.TestCase):
         compose = (ROOT.parent / "compose.yaml").read_text(encoding="utf-8")
         self.assertIn('WARP_ENABLE_NAT: "1"', compose)
         self.assertIn('GOST_ARGS: "-L=socks5://:11080"', compose)
-        self.assertNotIn("cloudflare-mesh:", compose)
+        self.assertIn("cloudflare-mesh:", compose)
+        self.assertIn('profiles: ["mobile"]', compose)
         for name in ("line1.json", "line2.json"):
             c = load(name)
             socks = next(x for x in c["outbounds"] if x["tag"] == "warp-local")

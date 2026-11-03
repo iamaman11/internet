@@ -24,9 +24,25 @@ jobs:
       - name: Native Docker Compose validation
         run: |
           docker compose version
+          # Verify the exact vendor digest exists before accepting new mobile service.
+          docker manifest inspect cloudflare/mesh@sha256:1c135f07ddac619562f45da5816b25d3ac7663a491c2a065bd83c005007dec5e >/dev/null
+          echo MESH_PINNED_IMAGE_VERIFIED=PASS
           docker compose --env-file vm/images.env.example -f vm/compose.yaml config --quiet
           docker compose --env-file vm/images.env.example -f vm/compose.yaml config --format json > "${RUNNER_TEMP}/internet-compose.json"
           python3 vm/tests/check_compose.py "${RUNNER_TEMP}/internet-compose.json"
+          # A missing Mesh identity must refuse only the mobile profile.
+          if docker compose --profile mobile --env-file vm/images.env.example -f vm/compose.yaml config --format json > /dev/null 2>&1; then
+            echo MESH_MISSING_SECRET_NOT_REJECTED >&2
+            exit 1
+          fi
+          echo MESH_MISSING_SECRET_REJECTED=PASS
+          mkdir -p vm/runtime
+          printf 'MESH_NODE_TOKEN=synthetic-ci-not-a-credential\n' > vm/runtime/mesh-node.env
+          chmod 0600 vm/runtime/mesh-node.env
+          docker compose --profile mobile --env-file vm/images.env.example -f vm/compose.yaml config --format json > "${RUNNER_TEMP}/internet-mobile-compose.json"
+          python3 vm/tests/check_compose.py "${RUNNER_TEMP}/internet-mobile-compose.json" --mobile
+          rm -f vm/runtime/mesh-node.env
+          echo MESH_ISOLATED_PROFILE=PASS
       - name: Native nftables GOST guard syntax (no production effects)
         run: |
           sudo apt-get update -qq

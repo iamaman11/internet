@@ -11,11 +11,13 @@ REQUIRED = {
 }
 
 
-def check(data):
+def check(data, mobile=False):
     services = data["services"]
-    assert set(services) == set(REQUIRED), f"unexpected services: {set(services) ^ set(REQUIRED)}"
-    assert set(data["networks"]) == {"edge"}, "extra unmanaged networks"
-    for name, service in services.items():
+    expected = set(REQUIRED) | ({"cloudflare-mesh"} if mobile else set())
+    assert set(services) == expected, f"unexpected services: {set(services) ^ expected}"
+    assert set(data["networks"]) == ({"edge", "mesh"} if mobile else {"edge"}), "extra unmanaged networks"
+    for name in REQUIRED:
+        service = services[name]
         image = service["image"]
         assert re.search(r"@sha256:[a-f0-9]{64}$", image), f"{name}: image must be pinned"
         actual = {
@@ -40,13 +42,32 @@ def check(data):
     l2 = services["line2-proxy"]["volumes"]
     assert any(v.get("target") == "/var/lib/sing-box" and not v.get("read_only", False) for v in l1)
     assert any(v.get("target") == "/var/lib/sing-box" and v.get("read_only", False) for v in l2)
-    assert not any("mesh" in name for name in services)
+    if not mobile:
+        assert "cloudflare-mesh" not in services, "mobile must be opt-in"
+        return
+    mesh = services["cloudflare-mesh"]
+    assert mesh["profiles"] == ["mobile"], "mesh must never start with normal Compose"
+    assert mesh["image"] == (
+        "cloudflare/mesh@sha256:1c135f07ddac619562f45da5816b25d3ac7663a491c2a065bd83c005007dec5e"
+    ), "mesh upstream image/digest changed unexpectedly"
+    assert set(mesh["networks"]) == {"mesh"}, "mesh must not share existing dataplane"
+    assert not mesh.get("ports"), "mesh cannot publish VM ports"
+    assert not mesh.get("depends_on"), "mesh must not recreate neighboring services"
+    assert set(mesh["cap_add"]) == {"NET_ADMIN", "NET_RAW"}, "mesh privilege scope changed"
+    assert any(d.get("source") == "/dev/net/tun" and d.get("target") == "/dev/net/tun"
+               for d in mesh["devices"]), "mesh TUN missing"
+    assert mesh["environment"].get("SRCNAT_ENABLED") == "true", "mesh source NAT disabled"
+    assert mesh["environment"].get("MESH_NODE_TOKEN"), "mesh token missing from protected env-file"
+    assert any(v.get("target") == "/var/lib/cloudflare-warp"
+               and v.get("type") == "volume"
+               and v.get("source") == "mesh-state" for v in mesh["volumes"]), "identity not persisted"
+    assert "mesh-state" in data["volumes"], "missing persistent identity volume"
 
 
 if __name__ == "__main__":
     try:
         with open(sys.argv[1], encoding="utf-8") as handle:
-            check(json.load(handle))
+            check(json.load(handle), mobile="--mobile" in sys.argv[2:])
     except (AssertionError, KeyError, IndexError, ValueError) as exc:
         print(f"COMPOSE_INVARIANT_FAILED: {exc}", file=sys.stderr)
         raise SystemExit(1)
