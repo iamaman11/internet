@@ -22,12 +22,27 @@ fn rules_path() -> PathBuf {
         .join("config")
         .join("selected-apps.rules.json")
 }
+// Windows process lookup preserves the casing of QueryFullProcessImageNameW.
+// Application identity is case-folded for stable Windows comparisons, so the
+// native process_path rule (case-sensitive) cannot match the stored string.
+// Use an anchored Go/RE2 path regexp with the native case-insensitive modifier.
+fn native_path_pattern(path: &str) -> String {
+    let mut result = String::from("(?i)^");
+    for ch in path.chars() {
+        if r"\\.+*?()[]{}^$|".contains(ch) {
+            result.push('\\');
+        }
+        result.push(ch);
+    }
+    result.push('$');
+    result
+}
 fn rules_source(state: &Settings) -> Value {
     let mut names = Vec::new();
     let mut paths = Vec::new();
     for app in &state.applications {
         if app.contains('\\') {
-            paths.push(app.as_str());
+            paths.push(native_path_pattern(app));
         } else {
             names.push(app.as_str());
         }
@@ -37,7 +52,7 @@ fn rules_source(state: &Settings) -> Value {
         rules.push(json!({"process_name":names}));
     }
     if !paths.is_empty() {
-        rules.push(json!({"process_path":paths}));
+        rules.push(json!({"process_path_regex":paths}));
     }
     json!({"version":3,"rules":rules})
 }
@@ -817,7 +832,7 @@ fn persist(path: &Path, old: &Settings, next: &Settings) -> Result<Value, &'stat
             "selected_apps":next.selected_apps,"applications":next.applications,
             "singbox_restarted":false,"hot_reload":"NATIVE_FILE_WATCHER",
             "runtime_confirmed":false,"egress":"NOT_TESTED_BY_APPLY",
-            "next_action":"internet app diagnose edge"}),
+            "next_action":"internet app diagnose <EXE>"}),
         );
     }
     let needs_restart = configured || old.managed_tun || next.managed_tun;
@@ -1045,12 +1060,20 @@ mod tests {
         assert_eq!(rule["rules"].as_array().unwrap().len(), 2);
         assert_eq!(rule["rules"][0]["process_name"], json!(["msedge.exe"]));
         assert_eq!(
-            rule["rules"][1]["process_path"],
-            json!([r"c:\program files (x86)\microsoft\edge\application\msedge.exe"])
+            rule["rules"][1]["process_path_regex"],
+            json!([r"(?i)^c:\\program files \(x86\)\\microsoft\\edge\\application\\msedge\.exe$"])
         );
         let mut other = s.clone();
         other.applications.clear();
         assert_eq!(rules_source(&other)["rules"], json!([]));
+    }
+    #[test]
+    fn process_path_pattern_is_anchored_escaped_and_case_insensitive() {
+        assert_eq!(
+            native_path_pattern(r"C:\Temp\A+[B](c)\my app.exe"),
+            r"(?i)^C:\\Temp\\A\+\[B\]\(c\)\\my app\.exe$"
+        );
+        assert_eq!(native_path_pattern(r"c:\a\b.exe"), r"(?i)^c:\\a\\b\.exe$");
     }
     #[test]
     fn hot_rule_set_alias_never_confuses_arbitrary_references() {
