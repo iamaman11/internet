@@ -156,6 +156,14 @@ def main():
                 {"process_path":["c:\\program files (x86)\\microsoft\\edge\\application\\msedge.exe"]}]})
             native_check(config_file)
             print("U3_NATIVE_PROCESS_NAME_AND_PATH=PASS",flush=True)
+            # On Windows, the process API preserves the real path casing while
+            # INTERNET normalizes its identity. Exact source process_path
+            # silently misses that case. Native (?i)^...$ must be accepted.
+            write_atomic(rules, {"version":3,"rules":[
+                {"process_path_regex":[
+                    r"(?i)^c:\\program files \(x86\)\\microsoft\\edge\\application\\msedge\.exe$"]}]})
+            native_check(config_file)
+            print("U3_NATIVE_PATH_CASE_INSENSITIVE_REGEX=PASS",flush=True)
             rules.write_text("{invalid-json", encoding="utf-8")
             native_check(config_file, expect=False)
             print("U3_NATIVE_REJECTS_INVALID_RULESET=PASS",flush=True)
