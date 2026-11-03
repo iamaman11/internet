@@ -157,20 +157,6 @@ fn application(value: &str) -> Result<String, &'static str> {
     if leaf.len() < 5 || !leaf.ends_with(".exe") || leaf.starts_with('.') {
         return Err("APPLICATION_NAME_INVALID");
     }
-    if [
-        "internet.exe",
-        "sing-box.exe",
-        "tunnel-client-runtime.exe",
-        "cloudflared.exe",
-        "pwsh.exe",
-        "powershell.exe",
-        "ssh.exe",
-        "wsl.exe",
-    ]
-    .contains(&leaf)
-    {
-        return Err("APPLICATION_CONTROL_PROCESS_FORBIDDEN");
-    }
     Ok(normalized)
 }
 
@@ -1009,7 +995,7 @@ mod tests {
         assert_eq!(toggle_state(&s, Switch::ManagedTun, false).unwrap(), s);
     }
     #[test]
-    fn app_names_paths_protected_processes_and_empty_list() {
+    fn app_names_paths_allow_all_executables_and_empty_list() {
         let s = Settings::default();
         assert!(
             toggle_state(&s, Switch::SelectedApps, true)
@@ -1029,13 +1015,18 @@ mod tests {
         }
         for v in [
             "internet.exe",
+            "sing-box.exe",
             "tunnel-client-runtime.exe",
+            "cloudflared.exe",
+            "pwsh.exe",
+            "powershell.exe",
+            "ssh.exe",
+            "wsl.exe",
             r"C:\bin\sing-box.exe",
         ] {
-            assert_eq!(
-                list_change(&s, true, v).unwrap_err(),
-                "APPLICATION_CONTROL_PROCESS_FORBIDDEN"
-            );
+            let added = list_change(&s, true, v).unwrap();
+            assert_eq!(added.applications, [v.to_lowercase()]);
+            assert_eq!(list_change(&added, false, v).unwrap(), s);
         }
         let s = list_change(&s, true, r"C:\Program Files\Mozilla Firefox\firefox.exe").unwrap();
         assert_eq!(
@@ -1149,7 +1140,7 @@ mod tests {
                 true,
                 Some(&[r"c:\evil\ssh.exe".to_owned()])
             ),
-            Err("APPLICATION_CONTROL_PROCESS_FORBIDDEN")
+            Err("APP_PROCESS_PATH_UNTRUSTED")
         );
         assert_eq!(
             resolve_application(
