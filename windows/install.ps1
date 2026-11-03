@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [string]$PackagePath,
-    [string]$ReleaseTag = 'v0.2.1'
+    [string]$ReleaseTag = 'v0.2.2'
 )
 $ErrorActionPreference = 'Stop'
 $root = 'C:\internet'
@@ -54,7 +54,21 @@ try {
     if (-not $PackagePath) {
         $PackagePath = Join-Path $stage 'internet-windows-x64.zip'
         $uri = "https://github.com/iamaman11/internet/releases/download/$ReleaseTag/internet-windows-x64.zip"
-        Invoke-WebRequest -Uri $uri -OutFile $PackagePath
+        # Windows 11 provides native curl.exe. This is the only online
+        # transport, with an explicit deadline and exit-code readback.
+        # Keep the existing package manifest/hash validation below.
+        $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+        if (-not (Test-Path -LiteralPath $curl -PathType Leaf)) {
+            throw 'WINDOWS_NATIVE_CURL_UNAVAILABLE'
+        }
+        & $curl -fSL -sS --retry 0 --connect-timeout 8 --max-time 180 --output $PackagePath -- $uri
+        if ($LASTEXITCODE -ne 0) {
+            throw "PACKAGE_DOWNLOAD_FAILED_CURL_EXIT_$LASTEXITCODE"
+        }
+        if (-not (Test-Path -LiteralPath $PackagePath -PathType Leaf) -or
+            (Get-Item -LiteralPath $PackagePath).Length -le 0) {
+            throw 'PACKAGE_DOWNLOAD_EMPTY'
+        }
     }
     if (-not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) {
         throw 'PACKAGE_NOT_FOUND'
