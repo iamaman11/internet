@@ -322,7 +322,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         ("backup", ["backup", "export", path]) => backup_export(Path::new(path)),
         ("restore", ["restore", path]) => restore(Path::new(path)),
         ("help", _) | ("--help", _) => Ok(
-            json!({"commands":["status [--deep]","tree","inspect <id>","diagnose [id]",
+            json!({"version":env!("CARGO_PKG_VERSION"),"commands":["status [--deep]","tree","inspect <id>","diagnose [id]",
             "route <direct-auto|direct-hysteria2|direct-vless|warp-auto|warp-hysteria2|warp-vless>",
             "wsl route <same>","start","stop","restart","configure --stdin",
             "backup export <external-directory>","restore <external-directory>",
