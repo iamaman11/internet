@@ -737,7 +737,18 @@ mod u2_backup_tests {
         b["foreign_config"] = json!("unowned");
         assert_eq!(parse_backup(&b).unwrap_err(), "BACKUP_FIELDS_INVALID");
         b.as_object_mut().unwrap().remove("foreign_config");
-        b["tun"]["applications"] = json!(["internet.exe"]);
+        b["tun"]["applications"] = json!([
+            "internet.exe",
+            "sing-box.exe",
+            "tunnel-client-runtime.exe",
+            "cloudflared.exe",
+            "pwsh.exe",
+            "powershell.exe",
+            "ssh.exe",
+            "wsl.exe"
+        ]);
+        assert!(parse_backup(&b).is_ok());
+        b["tun"]["applications"] = json!([r"..\internet.exe"]);
         assert_eq!(parse_backup(&b).unwrap_err(), "BACKUP_TUN_INVALID");
         b["tun"]["applications"] = json!(["codex.exe"]);
         b["tun"]["selected_apps"] = json!(true);
