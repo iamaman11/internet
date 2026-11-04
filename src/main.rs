@@ -283,7 +283,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         ("windows-mode", ["windows-mode", "status"]) => tun::status(),
         ("windows-mode", ["windows-mode", mode]) => {
             tun::WindowsMode::parse(mode).and_then(tun::windows_mode)
-        },
+        }
         ("wsl", ["wsl", "route", r]) => apply_route(Target::Wsl, r),
         ("tun", ["tun", "status"]) | ("selected-apps", ["selected-apps", "status"]) => {
             tun::status()

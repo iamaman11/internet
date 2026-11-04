@@ -300,7 +300,6 @@ pub fn mode_transition(old: &Settings, mode: WindowsMode) -> Result<Settings, &'
     Ok(next)
 }
 
-
 pub fn validate_native(c: &Value, on: bool) -> Result<(), &'static str> {
     let inb = c["inbounds"].as_array().ok_or("TUN_INBOUND_INVALID")?;
     let out = c["outbounds"].as_array().ok_or("TUN_OUTBOUND_INVALID")?;
