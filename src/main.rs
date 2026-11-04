@@ -533,6 +533,13 @@ fn menu_status() {
     println!("WSL:        {} / channel NOT_CHECKED", route(Target::Wsl));
     println!("TUN:        {}", switch("managed_tun"));
     println!("Selected:   {} ({count} apps)", switch("selected_apps"));
+    let tun_scope = match state.as_ref() {
+        Some(s) if !s.managed_tun => "OFF",
+        Some(s) if s.selected_apps => "SELECTED APPLICATIONS",
+        Some(_) => "ALL TUN-CAPTURED WINDOWS TRAFFIC",
+        None => "UNKNOWN",
+    };
+    println!("TUN scope (saved): {tun_scope}");
     println!("VM:         {vm} (NOT_CHECKED)");
 }
 fn menu_route(target: Target) -> Option<Vec<String>> {
@@ -561,7 +568,9 @@ fn menu_route(target: Target) -> Option<Vec<String>> {
     Some(args)
 }
 fn menu_wsl() -> Option<Vec<String>> {
-    println!("1. Route  2. Sync WSL listener (requires stopped sing-box)  0. Back");
+    println!("1. Route");
+    println!("2. Sync WSL listener (requires stopped sing-box)");
+    println!("0. Back");
     match read_choice("WSL action: ")?.as_str() {
         "1" => menu_route(Target::Wsl),
         "2" => Some(vec!["wsl".into(), "sync".into()]),
@@ -573,14 +582,22 @@ fn menu() -> i32 {
     loop {
         menu_status();
         println!();
-        println!("  1. Windows route        2. WSL route / sync");
-        println!("  3. Start / Stop        4. Selected Apps list");
-        println!("  5. Add application     6. Remove application");
-        println!("  7. Selected ON/OFF     8. Managed TUN ON/OFF");
-        println!("  9. Proxy addresses    10. Proxy credentials");
-        println!(" 11. Test 6 proxies     12. Status");
-        println!(" 13. Diagnose           14. App via VM");
-        println!(" 15. App direct         16. App route inspect");
+        println!("  1. Windows route");
+        println!("  2. WSL route / sync");
+        println!("  3. Start / Stop");
+        println!("  4. Selected Apps list");
+        println!("  5. Add application");
+        println!("  6. Remove application");
+        println!("  7. Selected Apps ON/OFF (ON = listed apps only)");
+        println!("  8. Managed TUN ON/OFF (OFF = normal Windows network)");
+        println!("  9. Proxy addresses");
+        println!(" 10. Proxy credentials");
+        println!(" 11. Test 6 proxies");
+        println!(" 12. Status");
+        println!(" 13. Diagnose");
+        println!(" 14. App via VM");
+        println!(" 15. App direct");
+        println!(" 16. App route inspect");
         println!("  0. Exit");
         let Some(choice) = read_choice("Choice: ") else {
             return 0;
@@ -590,7 +607,10 @@ fn menu() -> i32 {
             "1" => menu_route(Target::Desktop),
             "2" => menu_wsl(),
             "3" => {
-                println!("1. Start  2. Stop  3. Restart  0. Back");
+                println!("1. Start");
+                println!("2. Stop");
+                println!("3. Restart");
+                println!("0. Back");
                 read_choice("Action: ").map(|v| match v.as_str() {
                     "1" => vec!["start".into()],
                     "2" => vec!["stop".into()],
