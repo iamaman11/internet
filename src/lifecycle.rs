@@ -144,7 +144,7 @@ mod native {
         if other_processes()? {
             return Err("FOREIGN_SING_BOX_PROCESS");
         }
-        let network = crate::wsl::discover()?;
+        let network = crate::wsl::discover_for_start()?;
         if let Some(ref net) = network {
             let updated = config::with_wsl_gateway(&current, net.gateway)?;
             if updated != current {
