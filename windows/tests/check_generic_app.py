@@ -53,7 +53,9 @@ def main():
             assert not saved["managed_tun"], "U3_HIDDEN_TUN_ENABLE"
             assert str(copied).lower() in saved["applications"], "U3_SAVED_APP_NOT_FOUND"
             code, v = run("list")
-            assert code == 0 and v["managed_tun"] is False and v["selected_apps"] is False, "U3_OFFLINE_SCOPE_MISMATCH"
+            prior = json.loads(snapshot[1].decode("utf-8"))
+            assert code == 0 and v["managed_tun"] is False, "U3_OFFLINE_TUN_CHANGED"
+            assert v["selected_apps"] == prior["selected_apps"], "U3_OFFLINE_SELECTED_SWITCH_CHANGED"
             code, v = run("u3probe.exe", "direct")
             assert code == 0 and v["ok"], "U3_OFFLINE_REMOVE_FAILED"
             same(snapshot)
