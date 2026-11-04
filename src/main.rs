@@ -280,6 +280,10 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
             return diagnostic_output(&diagnostic::IDS, true, json_mode, true);
         }
         ("route", ["route", r]) => apply_route(Target::Desktop, r),
+        ("windows-mode", ["windows-mode", "status"]) => tun::status(),
+        ("windows-mode", ["windows-mode", mode]) => {
+            tun::WindowsMode::parse(mode).and_then(tun::windows_mode)
+        },
         ("wsl", ["wsl", "route", r]) => apply_route(Target::Wsl, r),
         ("tun", ["tun", "status"]) | ("selected-apps", ["selected-apps", "status"]) => {
             tun::status()
@@ -295,6 +299,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
             tun::change_application(false, name)
         }
         ("app", ["app", "list"]) | ("app", ["app", "status"]) => tun::app_list(),
+        ("app", ["app", "running"]) => tun::running_apps(),
         ("app", ["app", "diagnose", name]) => tun::app_diagnose(name),
         ("app", ["app", name, "vm"]) => tun::app_set(name, true),
         ("app", ["app", name, "direct"]) => tun::app_set(name, false),
@@ -350,8 +355,9 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
             "route <direct-auto|direct-hysteria2|direct-vless|warp-auto|warp-hysteria2|warp-vless>",
             "wsl route <same>","wsl sync (offline attach)","start","stop","restart","configure --stdin",
             "backup export <external-directory>","restore <external-directory>",
+             "windows-mode <normal|selected|all|status>",
              "tun <status|on|off>","selected-apps <status|on|off|add EXE|remove EXE>",
-            "app <list|status|EXE vm|EXE direct|diagnose EXE>",
+            "app <list|running|status|EXE vm|EXE direct|diagnose EXE>",
             "proxies <list|test|credentials>"],
              "note":"S4 native TUN has control-IP exclusion; selected-apps bypass is DIRECT outbound, not kernel bypass"}),
         ),
@@ -540,6 +546,9 @@ fn menu_status() {
         None => "UNKNOWN",
     };
     println!("TUN scope (saved): {tun_scope}");
+    if matches!(state.as_ref(), Some(s) if s.managed_tun && !s.selected_apps) {
+        println!("App-specific DIRECT exclusions: NOT SUPPORTED in ALL mode");
+    }
     println!("VM:         {vm} (NOT_CHECKED)");
 }
 fn menu_route(target: Target) -> Option<Vec<String>> {
@@ -578,35 +587,140 @@ fn menu_wsl() -> Option<Vec<String>> {
         _ => Some(vec!["invalid".into()]),
     }
 }
+fn menu_windows() -> Option<Vec<String>> {
+    println!();
+    println!("=== WINDOWS INTERNET MODE ===");
+    println!("1. All TUN-captured Windows traffic via VM (DIRECT)");
+    println!("2. Only selected applications via current route");
+    println!("3. Normal Windows network (TUN OFF)");
+    println!("4. Choose DIRECT / WARP route");
+    println!("0. Back");
+    match read_choice("Mode: ")?.as_str() {
+        "1" => Some(vec!["windows-mode".into(), "all".into()]),
+        "2" => Some(vec!["windows-mode".into(), "selected".into()]),
+        "3" => Some(vec!["windows-mode".into(), "normal".into()]),
+        "4" => menu_route(Target::Desktop),
+        "0" => Some(vec![]),
+        _ => Some(vec!["invalid".into()]),
+    }
+}
+fn menu_app_action(exe: &str) -> Option<Vec<String>> {
+    println!();
+    println!("Application: {exe}");
+    println!("1. Route via VM (save VM selection)");
+    println!("2. Normal route (remove VM selection; unavailable in ALL mode)");
+    println!("3. Inspect application route");
+    println!("0. Back");
+    match read_choice("Application action: ")?.as_str() {
+        "1" => Some(vec!["app".into(), exe.into(), "vm".into()]),
+        "2" => Some(vec!["app".into(), exe.into(), "direct".into()]),
+        "3" => Some(vec!["app".into(), "diagnose".into(), exe.into()]),
+        "0" => Some(vec![]),
+        _ => Some(vec!["invalid".into()]),
+    }
+}
+fn menu_select_app(paths: &[String]) -> Option<Vec<String>> {
+    if paths.is_empty() {
+        println!("No matching applications. Choose an exact EXE path instead.");
+        return Some(vec![]);
+    }
+    for (index, path) in paths.iter().enumerate() {
+        println!("{}. {}", index + 1, path);
+    }
+    let choice = read_choice("Application number (0 = back): ")?;
+    if choice == "0" {
+        return Some(vec![]);
+    }
+    let Some(index) = choice
+        .parse::<usize>()
+        .ok()
+        .filter(|n| (1..=paths.len()).contains(n))
+    else {
+        println!("Invalid application number.");
+        return Some(vec![]);
+    };
+    menu_app_action(&paths[index - 1])
+}
+fn menu_apps() -> Option<Vec<String>> {
+    println!();
+    println!("=== MANAGED APPLICATIONS ===");
+    println!("Saved entries are retained in every Windows mode.");
+    println!("Only SELECTED mode applies per-app VM/direct routes.");
+    let saved = match tun::read_at(&tun::path()) {
+        Ok(value) => value.applications,
+        Err(code) => {
+            println!("Managed list unavailable: {code}");
+            return Some(vec![]);
+        }
+    };
+    for item in &saved {
+        println!("  VM selection: {item}");
+    }
+    if saved.is_empty() {
+        println!("  No saved applications.");
+    }
+    println!("1. Choose saved application");
+    println!("2. Choose running Windows application");
+    println!("3. Enter exact EXE path");
+    println!("0. Back");
+    match read_choice("Application source: ")?.as_str() {
+        "1" => menu_select_app(&saved),
+        "2" => {
+            let inventory = match tun::running_apps() {
+                Ok(value) => value,
+                Err(code) => {
+                    println!("Windows process inventory unavailable: {code}");
+                    return Some(vec![]);
+                }
+            };
+            if inventory["truncated"] == true {
+                println!("Inventory limited to first 128 unique executable paths.");
+            }
+            let paths = inventory["paths"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect::<Vec<_>>();
+            menu_select_app(&paths)
+        }
+        "3" => {
+            let path = read_choice("Exact executable path (.exe; 0 = back): ")?;
+            if path == "0" {
+                Some(vec![])
+            } else {
+                menu_app_action(&path)
+            }
+        }
+        "0" => Some(vec![]),
+        _ => Some(vec!["invalid".into()]),
+    }
+}
 fn menu() -> i32 {
     loop {
         menu_status();
         println!();
-        println!("  1. Windows route");
-        println!("  2. WSL route / sync");
-        println!("  3. Start / Stop");
-        println!("  4. Selected Apps list");
-        println!("  5. Add application");
-        println!("  6. Remove application");
-        println!("  7. Selected Apps ON/OFF (ON = listed apps only)");
-        println!("  8. Managed TUN ON/OFF (OFF = normal Windows network)");
-        println!("  9. Proxy addresses");
-        println!(" 10. Proxy credentials");
-        println!(" 11. Test 6 proxies");
-        println!(" 12. Status");
-        println!(" 13. Diagnose");
-        println!(" 14. App via VM");
-        println!(" 15. App direct");
-        println!(" 16. App route inspect");
+        println!("  1. Windows internet mode");
+        println!("  2. Manage applications");
+        println!("  3. Windows route DIRECT / WARP");
+        println!("  4. WSL route / sync");
+        println!("  5. Start / Stop");
+        println!("  6. Proxy addresses");
+        println!("  7. Proxy credentials");
+        println!("  8. Test 6 proxies");
+        println!("  9. Status");
+        println!(" 10. Diagnose");
         println!("  0. Exit");
         let Some(choice) = read_choice("Choice: ") else {
             return 0;
         };
         let args = match choice.as_str() {
             "0" => return 0,
-            "1" => menu_route(Target::Desktop),
-            "2" => menu_wsl(),
-            "3" => {
+            "1" => menu_windows(),
+            "2" => menu_apps(),
+            "3" => menu_route(Target::Desktop),
+            "4" => menu_wsl(),
+            "5" => {
                 println!("1. Start");
                 println!("2. Stop");
                 println!("3. Restart");
@@ -619,47 +733,11 @@ fn menu() -> i32 {
                     _ => vec!["invalid".into()],
                 })
             }
-            "4" => Some(vec!["selected-apps".into(), "status".into()]),
-            "5" | "6" => read_choice("Executable name (.exe): ").map(|name| {
-                vec![
-                    "selected-apps".into(),
-                    if choice == "5" { "add" } else { "remove" }.into(),
-                    name,
-                ]
-            }),
-            "7" | "8" => read_choice("on / off (0 = back): ").map(|v| {
-                if v == "0" {
-                    vec![]
-                } else {
-                    vec![
-                        if choice == "7" {
-                            "selected-apps"
-                        } else {
-                            "tun"
-                        }
-                        .into(),
-                        v,
-                    ]
-                }
-            }),
-            "9" => Some(vec!["proxies".into(), "list".into()]),
-            "10" => Some(vec!["proxies".into(), "credentials".into()]),
-            "11" => Some(vec!["proxies".into(), "test".into()]),
-            "12" => Some(vec!["status".into()]),
-            "13" => Some(vec!["diagnose".into()]),
-            "14" | "15" | "16" => {
-                read_choice("Executable name or exact path (.exe): ").map(|name| {
-                    if choice == "16" {
-                        vec!["app".into(), "diagnose".into(), name]
-                    } else {
-                        vec![
-                            "app".into(),
-                            name,
-                            if choice == "14" { "vm" } else { "direct" }.into(),
-                        ]
-                    }
-                })
-            }
+            "6" => Some(vec!["proxies".into(), "list".into()]),
+            "7" => Some(vec!["proxies".into(), "credentials".into()]),
+            "8" => Some(vec!["proxies".into(), "test".into()]),
+            "9" => Some(vec!["status".into()]),
+            "10" => Some(vec!["diagnose".into()]),
             _ => {
                 println!("Unknown choice.");
                 continue;

@@ -264,6 +264,43 @@ pub enum Switch {
     SelectedApps,
 }
 
+/// Operator profiles are projections of the two existing saved switches.
+/// No additional mode state is stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowsMode {
+    Normal,
+    Selected,
+    All,
+}
+impl WindowsMode {
+    pub fn parse(raw: &str) -> Result<Self, &'static str> {
+        match raw {
+            "normal" => Ok(Self::Normal),
+            "selected" => Ok(Self::Selected),
+            "all" => Ok(Self::All),
+            _ => Err("WINDOWS_MODE_INVALID"),
+        }
+    }
+}
+pub fn mode_transition(old: &Settings, mode: WindowsMode) -> Result<Settings, &'static str> {
+    validate(old)?;
+    let mut next = old.clone();
+    match mode {
+        WindowsMode::Normal => next.managed_tun = false,
+        WindowsMode::Selected => {
+            next.managed_tun = true;
+            next.selected_apps = true;
+        }
+        WindowsMode::All => {
+            next.managed_tun = true;
+            next.selected_apps = false;
+        }
+    }
+    validate(&next)?;
+    Ok(next)
+}
+
+
 pub fn validate_native(c: &Value, on: bool) -> Result<(), &'static str> {
     let inb = c["inbounds"].as_array().ok_or("TUN_INBOUND_INVALID")?;
     let out = c["outbounds"].as_array().ok_or("TUN_OUTBOUND_INVALID")?;
@@ -519,6 +556,36 @@ fn running_paths(name: &str) -> Result<Vec<String>, &'static str> {
     paths.sort();
     Ok(paths)
 }
+/// Native Windows process inventory on demand, without scanning installed
+/// software or maintaining a second application registry.
+pub fn running_apps() -> Result<Value, &'static str> {
+    if !cfg!(windows) {
+        return Err("WINDOWS_ONLY");
+    }
+    let script = r#"[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $ErrorActionPreference='Stop'; Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath} | Select-Object -ExpandProperty ExecutablePath -Unique | ForEach-Object {[Console]::WriteLine($_)}"#;
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .map_err(|_| "APP_PROCESS_QUERY_FAILED")?;
+    if !output.status.success() || output.stdout.len() > 512 * 1024 {
+        return Err("APP_PROCESS_QUERY_FAILED");
+    }
+    let raw = String::from_utf8(output.stdout).map_err(|_| "APP_PROCESS_QUERY_FAILED")?;
+    let mut paths = Vec::new();
+    for raw_path in raw.lines().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Ok(path) = application(raw_path) {
+            if path.contains('\\') && !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths.sort();
+    let truncated = paths.len() > 128;
+    paths.truncate(128);
+    Ok(json!({"ok":true,"source":"windows_process_executable_path",
+        "paths":paths,"truncated":truncated,
+        "next_action":"internet app <exact-path> vm|direct"}))
+}
 fn resolve_application(
     raw: &str,
     old: &Settings,
@@ -574,15 +641,8 @@ fn resolve_application(
 }
 fn app_transition(old: &Settings, vm: bool, target: &str) -> Result<Settings, &'static str> {
     validate(old)?;
-    if vm && !old.managed_tun {
-        return Err("APP_TUN_OFF_ENABLE_EXPLICITLY");
-    }
-    if old.managed_tun && !old.selected_apps {
-        return if vm {
-            Ok(old.clone())
-        } else {
-            Err("APP_DIRECT_REQUIRES_SELECTED_APPS")
-        };
+    if old.managed_tun && !old.selected_apps && !vm {
+        return Err("APP_DIRECT_REQUIRES_SELECTED_APPS");
     }
     let mut next = old.clone();
     let leaf = executable_leaf(target);
@@ -602,31 +662,19 @@ pub fn app_set(raw: &str, vm: bool) -> Result<Value, &'static str> {
         return Err("WINDOWS_ONLY");
     }
     let old = read_at(&path())?;
-    if vm && !old.managed_tun {
-        return Err("APP_TUN_OFF_ENABLE_EXPLICITLY");
-    }
     if old.managed_tun && !old.selected_apps && !vm {
         return Err("APP_DIRECT_REQUIRES_SELECTED_APPS");
     }
     let (exact, source) = resolve_application(raw, &old, vm, None)?;
-    if old.managed_tun && !old.selected_apps {
-        let current = status()?;
-        if current["desired_native_match"] != true || current["native_tun_up"] != true {
-            return Err("TUN_NATIVE_STATE_MISMATCH");
-        }
-        return Ok(json!({"ok":true,"changed":false,
-            "application":exact,"identity_source":source,
-            "scope":"ALL_APPLICATIONS_VIA_VM",
-            "physical_egress":"NOT_TESTED_BY_STATUS",
-            "next_action":"internet app list"}));
-    }
     let next = app_transition(&old, vm, &exact)?;
-    let mut result = persist(&path(), &old, &next)?;
+    let mut result = persist(&path(), &old, &next, None)?;
     result["application"] = json!(exact);
     result["identity_source"] = json!(source);
     result["desired_route"] = json!(if vm { "VM" } else { "DIRECT" });
     result["scope"] = json!(if !next.managed_tun {
-        "TUN_OFF"
+        "SAVED_INACTIVE"
+    } else if !next.selected_apps {
+        "ALL_APPLICATIONS_SAVED_LIST_INACTIVE"
     } else {
         "SELECTED_APPLICATIONS"
     });
@@ -791,7 +839,31 @@ pub fn command(switch: Switch, enable: bool) -> Result<Value, &'static str> {
     }
     let current = read_at(&path())?;
     let next = toggle_state(&current, switch, enable)?;
-    persist(&path(), &current, &next)
+    persist(&path(), &current, &next, None)
+}
+/// One operator action changes the target TUN mode using the existing native
+/// apply/rollback path. The ALL profile also selects the VM DIRECT route in the
+/// same prepared sing-box configuration, avoiding an intermediate selector PUT.
+pub fn windows_mode(mode: WindowsMode) -> Result<Value, &'static str> {
+    if !cfg!(windows) {
+        return Err("WINDOWS_ONLY");
+    }
+    let old = read_at(&path())?;
+    let next = mode_transition(&old, mode)?;
+    let desktop = if mode == WindowsMode::All {
+        Some(crate::model::Route::DirectAuto)
+    } else {
+        None
+    };
+    let mut output = persist(&path(), &old, &next, desktop)?;
+    output["mode"] = json!(match mode {
+        WindowsMode::Normal => "normal",
+        WindowsMode::Selected => "selected",
+        WindowsMode::All => "all",
+    });
+    output["egress"] = json!("NOT_TESTED_BY_APPLY");
+    output["next_action"] = json!("internet diagnose windows/tun");
+    Ok(output)
 }
 pub fn change_application(add: bool, name: &str) -> Result<Value, &'static str> {
     if !cfg!(windows) {
@@ -799,10 +871,21 @@ pub fn change_application(add: bool, name: &str) -> Result<Value, &'static str> 
     }
     let current = read_at(&path())?;
     let next = list_change(&current, add, name)?;
-    persist(&path(), &current, &next)
+    persist(&path(), &current, &next, None)
 }
-fn persist(path: &Path, old: &Settings, next: &Settings) -> Result<Value, &'static str> {
+fn persist(
+    path: &Path,
+    old: &Settings,
+    next: &Settings,
+    desktop_route: Option<crate::model::Route>,
+) -> Result<Value, &'static str> {
     let current = config::read(&config::installed())?;
+    let planned = if let Some(route) = desktop_route {
+        config::with_selected(&current, crate::model::Target::Desktop, route)?
+    } else {
+        current.clone()
+    };
+    let route_changed = planned != current;
     let configured = current["inbounds"].as_array().is_some_and(|v| v.len() == 3);
     // A crash after native apply but before state persistence must not trap
     // Windows in a TUN that "tun off" refuses to remove.
@@ -810,7 +893,7 @@ fn persist(path: &Path, old: &Settings, next: &Settings) -> Result<Value, &'stat
     if recovering && next.managed_tun {
         return Err("TUN_DESIRED_NATIVE_DRIFT");
     }
-    if old == next && !recovering {
+    if old == next && !recovering && !route_changed {
         return Ok(
             json!({"ok":true,"changed":false,"managed_tun":old.managed_tun,
             "selected_apps":old.selected_apps,"applications":old.applications,
@@ -826,6 +909,7 @@ fn persist(path: &Path, old: &Settings, next: &Settings) -> Result<Value, &'stat
         && old.selected_apps
         && next.selected_apps
         && hot_native(&current)
+        && !route_changed
     {
         if !crate::lifecycle::is_running()? {
             return Err("TUN_TASK_NOT_RUNNING");
@@ -849,7 +933,7 @@ fn persist(path: &Path, old: &Settings, next: &Settings) -> Result<Value, &'stat
             "next_action":"internet app diagnose <EXE>"}),
         );
     }
-    let needs_restart = configured || old.managed_tun || next.managed_tun;
+    let needs_restart = configured || old.managed_tun || next.managed_tun || route_changed;
     if !needs_restart {
         config::protect_private_directory(path.parent().ok_or("TUN_STATE_PATH_INVALID")?)?;
         write_at(path, next)?;
@@ -862,7 +946,7 @@ fn persist(path: &Path, old: &Settings, next: &Settings) -> Result<Value, &'stat
         } else {
             vec![]
         };
-        let updated = render_native(&current, next, &ips)?;
+        let updated = render_native(&planned, next, &ips)?;
         if next.managed_tun && next.selected_apps {
             write_hot_rules(next)?;
         }
@@ -1049,6 +1133,34 @@ mod tests {
         );
     }
     #[test]
+    fn operator_modes_preserve_selected_application_inventory() {
+        let initial = list_change(&Settings::default(), true, "firefox.exe").unwrap();
+        let selected = mode_transition(&initial, WindowsMode::Selected).unwrap();
+        assert!(selected.managed_tun && selected.selected_apps);
+        let all = mode_transition(&selected, WindowsMode::All).unwrap();
+        assert!(all.managed_tun && !all.selected_apps);
+        let normal = mode_transition(&all, WindowsMode::Normal).unwrap();
+        assert!(!normal.managed_tun && !normal.selected_apps);
+        assert_eq!(normal.applications, ["firefox.exe"]);
+        let selected_again = mode_transition(&normal, WindowsMode::Selected).unwrap();
+        assert_eq!(selected_again.applications, ["firefox.exe"]);
+        assert_eq!(WindowsMode::parse("all"), Ok(WindowsMode::All));
+        assert_eq!(WindowsMode::parse("ALL"), Err("WINDOWS_MODE_INVALID"));
+        assert_eq!(WindowsMode::parse("vpn"), Err("WINDOWS_MODE_INVALID"));
+    }
+    #[test]
+    fn offline_application_selection_is_saved_not_activated() {
+        let initial = Settings::default();
+        let saved = app_transition(&initial, true, r"c:\apps\example\demo.exe").unwrap();
+        assert!(!saved.managed_tun);
+        assert_eq!(saved.applications, [r"c:\apps\example\demo.exe"]);
+        let all = mode_transition(&saved, WindowsMode::All).unwrap();
+        assert_eq!(
+            app_transition(&all, false, r"c:\apps\example\demo.exe"),
+            Err("APP_DIRECT_REQUIRES_SELECTED_APPS")
+        );
+    }
+    #[test]
     fn two_switches_are_independent_and_inert_list_does_not_start_tun() {
         let s = Settings::default();
         let s = list_change(&s, true, "Firefox.EXE").unwrap();
@@ -1160,12 +1272,12 @@ mod tests {
         let browser = r"c:\program files\browser\browser.exe";
         let editor = r"c:\tools\editor.exe";
         let inactive = list_change(&Settings::default(), true, "another.exe").unwrap();
-        assert_eq!(
-            app_transition(&inactive, true, browser),
-            Err("APP_TUN_OFF_ENABLE_EXPLICITLY")
-        );
+        let saved_off = app_transition(&inactive, true, browser).unwrap();
+        assert!(!saved_off.managed_tun);
+        assert!(saved_off.applications.contains(&browser.to_owned()));
         let all = toggle_state(&inactive, Switch::ManagedTun, true).unwrap();
-        assert_eq!(app_transition(&all, true, browser), Ok(all.clone()));
+        let staged_all = app_transition(&all, true, browser).unwrap();
+        assert!(staged_all.applications.contains(&browser.to_owned()));
         assert_eq!(
             app_transition(&all, false, browser),
             Err("APP_DIRECT_REQUIRES_SELECTED_APPS")
