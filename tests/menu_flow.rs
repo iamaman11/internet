@@ -68,7 +68,10 @@ fn menu_uses_one_column_and_explains_full_tun_scope() {
     for number in 1..=16 {
         let prefix = format!(" {:>2}. ", number);
         assert_eq!(
-            first_menu.lines().filter(|line| line.starts_with(&prefix)).count(),
+            first_menu
+                .lines()
+                .filter(|line| line.starts_with(&prefix))
+                .count(),
             1,
             "option {number} must occupy its own row"
         );
@@ -76,8 +79,9 @@ fn menu_uses_one_column_and_explains_full_tun_scope() {
     assert!(first_menu.contains("  7. Selected Apps ON/OFF (ON = listed apps only)"));
     assert!(first_menu.contains("  8. Managed TUN ON/OFF (OFF = normal Windows network)"));
     assert!(first_menu.contains("TUN scope (saved):"));
-    assert!(stdout.contains("1. Route\n2. Sync WSL listener") || stdout.contains("1. Route\r\n2. Sync WSL listener"));
-    assert!(stdout.contains("1. Start\n2. Stop") || stdout.contains("1. Start\r\n2. Stop"));
+    let normalized = stdout.replace("\r\n", "\n");
+    assert!(normalized.contains("1. Route\n2. Sync WSL listener"));
+    assert!(normalized.contains("1. Start\n2. Stop"));
 }
 
 #[test]
