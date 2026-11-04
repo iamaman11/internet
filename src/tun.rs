@@ -737,7 +737,11 @@ fn adapter_up() -> Result<bool, &'static str> {
     // SAFETY: Table is the first element of a contiguous, API-allocated array.
     let rows = unsafe { std::slice::from_raw_parts((*table.0).Table.as_ptr(), count) };
     for row in rows {
-        let len = row.Alias.iter().position(|ch| *ch == 0).unwrap_or(row.Alias.len());
+        let len = row
+            .Alias
+            .iter()
+            .position(|ch| *ch == 0)
+            .unwrap_or(row.Alias.len());
         if String::from_utf16_lossy(&row.Alias[..len]).eq_ignore_ascii_case("internet-tun") {
             return Ok(row.OperStatus == IfOperStatusUp);
         }

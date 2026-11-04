@@ -31,8 +31,11 @@ pub fn batch(ids: &[&str], deep: bool) -> Vec<Diagnostic> {
     let needs_task = ids.iter().any(|id| {
         matches!(
             *id,
-            "windows/sing-box" | "windows/desktop-selector" | "windows/wsl-selector"
-                | "windows/tun" | "windows/selected-apps"
+            "windows/sing-box"
+                | "windows/desktop-selector"
+                | "windows/wsl-selector"
+                | "windows/tun"
+                | "windows/selected-apps"
         )
     });
     let task = if needs_task && cfg!(windows) {
@@ -43,7 +46,9 @@ pub fn batch(ids: &[&str], deep: bool) -> Vec<Diagnostic> {
     // The same adapter/desired/task observation serves both switch resources.
     // Read once per command, even for deep diagnosis; never cache across calls.
     let switch_snapshot = if cfg!(windows)
-        && ids.iter().any(|id| matches!(*id, "windows/tun" | "windows/selected-apps"))
+        && ids
+            .iter()
+            .any(|id| matches!(*id, "windows/tun" | "windows/selected-apps"))
     {
         Some(tun::status())
     } else {
