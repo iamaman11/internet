@@ -124,16 +124,26 @@ mod native {
             .map_err(|_| "PROCESS_INVENTORY_FAILED")
     }
     // Native sing-box validates the candidate before the single config is written.
-    fn checked_replace(path: &Path, current: &serde_json::Value, updated: &serde_json::Value) -> Result<(), &'static str> {
+    fn checked_replace(
+        path: &Path,
+        current: &serde_json::Value,
+        updated: &serde_json::Value,
+    ) -> Result<(), &'static str> {
         if current == updated {
             return Ok(());
         }
-        let check_path = path.parent().ok_or("CONFIG_PATH_INVALID")?.join("sing-box.wsl-check.json");
+        let check_path = path
+            .parent()
+            .ok_or("CONFIG_PATH_INVALID")?
+            .join("sing-box.wsl-check.json");
         if check_path.exists() {
             return Err("CONFIG_CHECK_CONFLICT");
         }
-        fs::write(&check_path, serde_json::to_vec(updated).map_err(|_| "CONFIG_SERIALIZE_FAILED")?)
-            .map_err(|_| "CONFIG_CHECK_WRITE_FAILED")?;
+        fs::write(
+            &check_path,
+            serde_json::to_vec(updated).map_err(|_| "CONFIG_SERIALIZE_FAILED")?,
+        )
+        .map_err(|_| "CONFIG_CHECK_WRITE_FAILED")?;
         let test = native_check(&check_path);
         let _ = fs::remove_file(&check_path);
         test?;

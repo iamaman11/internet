@@ -42,8 +42,11 @@ fn emit(v: &Value, json_mode: bool) {
             println!("Next: {next}");
         }
     } else if v["ok"] == true && v["observed"].is_string() {
-        println!("OK: {} [{}]", v["observed"].as_str().unwrap_or("UNKNOWN"),
-            v["owner"].as_str().unwrap_or("INTERNET"));
+        println!(
+            "OK: {} [{}]",
+            v["observed"].as_str().unwrap_or("UNKNOWN"),
+            v["owner"].as_str().unwrap_or("INTERNET")
+        );
     } else {
         println!("{}", v);
     }
@@ -485,7 +488,8 @@ fn menu_status() {
     };
     let saved = config::read(&config::installed()).ok();
     let route = |target| {
-        let stored = saved.as_ref()
+        let stored = saved
+            .as_ref()
             .and_then(|c| config::selected(c, target).ok())
             .map(|r| r.tag().to_owned())
             .unwrap_or_else(|| "NOT_CONFIGURED".into());
@@ -507,12 +511,16 @@ fn menu_status() {
         Some(true) => "ON saved / runtime UNKNOWN".into(),
         None => "UNKNOWN".into(),
     };
-    let count = state.as_ref()
+    let count = state
+        .as_ref()
         .and_then(|s| s["applications"].as_array())
         .map(|a| a.len().to_string())
         .unwrap_or_else(|| "?".into());
-    let vm = proxies::endpoint().map(|(ip, _)| ip).unwrap_or_else(|_| "?".into());
-    println!("\n============ INTERNET ============");
+    let vm = proxies::endpoint()
+        .map(|(ip, _)| ip)
+        .unwrap_or_else(|_| "?".into());
+    println!();
+    println!("============ INTERNET ============");
     println!("sing-box:   {running}");
     println!("Windows:    {}", route(Target::Desktop));
     println!("WSL:        {} / channel NOT_CHECKED", route(Target::Wsl));
@@ -521,7 +529,8 @@ fn menu_status() {
     println!("VM:         {vm} (NOT_CHECKED)");
 }
 fn menu_route(target: Target) -> Option<Vec<String>> {
-    println!("\nChoose route (0 = back):");
+    println!();
+    println!("Choose route (0 = back):");
     for (i, route) in ROUTES.iter().enumerate() {
         println!("  {}. {}", i + 1, route);
     }
@@ -556,7 +565,8 @@ fn menu_wsl() -> Option<Vec<String>> {
 fn menu() -> i32 {
     loop {
         menu_status();
-        println!("\n  1. Windows route        2. WSL route / sync");
+        println!();
+        println!("  1. Windows route        2. WSL route / sync");
         println!("  3. Start / Stop        4. Selected Apps list");
         println!("  5. Add application     6. Remove application");
         println!("  7. Selected ON/OFF     8. Managed TUN ON/OFF");
@@ -565,7 +575,7 @@ fn menu() -> i32 {
         println!(" 13. Diagnose           14. App via VM");
         println!(" 15. App direct         16. App route inspect");
         println!("  0. Exit");
-        let Some(choice) = read_choice("\nChoice: ") else {
+        let Some(choice) = read_choice("Choice: ") else {
             return 0;
         };
         let args = match choice.as_str() {

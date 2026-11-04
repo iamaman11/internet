@@ -69,12 +69,16 @@ fn read_only_command_with_timeout(
 /// Native Windows bind is the source of local address ownership. No WSL process
 /// is spawned. The optional WSL inbound cannot prevent Desktop/TUN startup.
 #[cfg(windows)]
-pub fn windows_start_config(current: &serde_json::Value) -> Result<serde_json::Value, &'static str> {
+pub fn windows_start_config(
+    current: &serde_json::Value,
+) -> Result<serde_json::Value, &'static str> {
     use std::io::ErrorKind;
-    let address: Ipv4Addr = current.pointer("/inbounds/1/listen")
+    let address: Ipv4Addr = current
+        .pointer("/inbounds/1/listen")
         .and_then(|v| v.as_str())
         .ok_or("WSL_LISTENER_INVALID")?
-        .parse().map_err(|_| "WSL_LISTENER_INVALID")?;
+        .parse()
+        .map_err(|_| "WSL_LISTENER_INVALID")?;
     if address.is_loopback() {
         return Ok(current.clone());
     }
@@ -83,7 +87,9 @@ pub fn windows_start_config(current: &serde_json::Value) -> Result<serde_json::V
             drop(socket);
             Ok(current.clone())
         }
-        Err(e) if e.kind() == ErrorKind::AddrNotAvailable => crate::config::with_wsl_loopback(current),
+        Err(e) if e.kind() == ErrorKind::AddrNotAvailable => {
+            crate::config::with_wsl_loopback(current)
+        }
         Err(_) => Err("WSL_LISTENER_NATIVE_CHECK_FAILED"),
     }
 }

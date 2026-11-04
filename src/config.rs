@@ -225,10 +225,7 @@ pub fn with_wsl_gateway(
 pub fn with_wsl_loopback(original: &Value) -> Result<Value, &'static str> {
     with_wsl_listen(original, std::net::Ipv4Addr::LOCALHOST)
 }
-fn with_wsl_listen(
-    original: &Value,
-    address: std::net::Ipv4Addr,
-) -> Result<Value, &'static str> {
+fn with_wsl_listen(original: &Value, address: std::net::Ipv4Addr) -> Result<Value, &'static str> {
     validate(original)?;
     if !address.is_loopback() && !address.is_private() {
         return Err("WSL_GATEWAY_INVALID");
@@ -387,7 +384,10 @@ mod tests {
         let current = with_wsl_gateway(&original, address).unwrap();
         let fallback = with_wsl_loopback(&current).unwrap();
         assert_eq!(fallback["inbounds"][1]["listen"], "127.0.0.1");
-        assert_eq!(fallback["inbounds"][1]["users"], current["inbounds"][1]["users"]);
+        assert_eq!(
+            fallback["inbounds"][1]["users"],
+            current["inbounds"][1]["users"]
+        );
         assert_eq!(fallback["inbounds"][0], current["inbounds"][0]);
         assert_eq!(fallback["outbounds"], current["outbounds"]);
         assert_eq!(fallback["route"], current["route"]);
