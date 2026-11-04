@@ -1004,7 +1004,7 @@ pub(crate) fn inspect_with_snapshot(
         }
         Err(code) => {
             d.health = Health::Unknown;
-            d.reason_code = match code {
+            d.reason_code = match *code {
                 "TUN_STATE_INTERRUPTED" => "TUN_STATE_INTERRUPTED",
                 "TUN_STATE_JSON_INVALID" | "TUN_STATE_SCHEMA_INVALID" => "TUN_STATE_INVALID",
                 "HOT_RULESET_DRIFT" | "HOT_RULESET_NOT_FOUND" | "HOT_RULESET_INVALID" => {
