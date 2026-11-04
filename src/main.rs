@@ -5,6 +5,14 @@ use internet::{
     proxies, selector, tun,
 };
 use serde_json::{Value, json};
+
+// Some Windows hosts disable native LF-to-CRLF console processing; explicit
+// CRLF keeps interactive menu lines aligned even after repeated errors.
+#[cfg(windows)]
+macro_rules! println {
+    () => { print!("\r\n") };
+    ($($args:tt)*) => { print!("{}\r\n", format_args!($($args)*)) };
+}
 use std::{
     env, fs,
     io::{self, Read, Write},
@@ -13,7 +21,10 @@ use std::{
 
 fn emit(v: &Value, json_mode: bool) {
     if json_mode {
-        println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+        let serialized = serde_json::to_string_pretty(v).unwrap_or_default();
+        #[cfg(windows)]
+        let serialized = serialized.replace('\n', "\r\n");
+        println!("{serialized}");
     } else if let Some(a) = v.as_array() {
         for item in a {
             println!(
@@ -25,6 +36,14 @@ fn emit(v: &Value, json_mode: bool) {
                 item["source"].as_str().unwrap_or("-")
             );
         }
+    } else if v["ok"] == false {
+        println!("ERROR: {}", v["reason_code"].as_str().unwrap_or("UNKNOWN"));
+        if let Some(next) = v["next_action"].as_str() {
+            println!("Next: {next}");
+        }
+    } else if v["ok"] == true && v["observed"].is_string() {
+        println!("OK: {} [{}]", v["observed"].as_str().unwrap_or("UNKNOWN"),
+            v["owner"].as_str().unwrap_or("INTERNET"));
     } else {
         println!("{}", v);
     }
@@ -312,6 +331,8 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
                 }
             };
         }
+        ("wsl", ["wsl", "sync"]) => lifecycle::sync_wsl()
+            .map(|_| json!({"ok":true,"observed":"wsl-bound","next_action":"internet start"})),
         ("start", ["start"]) => lifecycle::start()
             .map(|_| json!({"ok":true,"owner":"Windows Task Scheduler","observed":"running"})),
         ("stop", ["stop"]) => lifecycle::stop()
@@ -324,7 +345,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         ("help", _) | ("--help", _) => Ok(
             json!({"version":env!("CARGO_PKG_VERSION"),"commands":["status [--deep]","tree","inspect <id>","diagnose [id]",
             "route <direct-auto|direct-hysteria2|direct-vless|warp-auto|warp-hysteria2|warp-vless>",
-            "wsl route <same>","start","stop","restart","configure --stdin",
+            "wsl route <same>","wsl sync (offline attach)","start","stop","restart","configure --stdin",
             "backup export <external-directory>","restore <external-directory>",
              "tun <status|on|off>","selected-apps <status|on|off|add EXE|remove EXE>",
             "app <list|status|EXE vm|EXE direct|diagnose EXE>",
@@ -358,6 +379,12 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
                     } else if code == "APP_EXECUTABLE_AMBIGUOUS_USE_PATH"
                         || code == "APP_NOT_RUNNING_USE_FULL_PATH" {
                         "Use the exact executable path (internet app C:\\path\\program.exe vm)"
+                    } else if code == "WSL_SYNC_REQUIRES_STOP" {
+                        "internet stop; internet wsl sync; internet start (interrupts Windows apps)"
+                    } else if code == "WSL_GUEST_UNAVAILABLE" {
+                        "Windows works without WSL; repair Ubuntu before internet wsl sync"
+                    } else if code == "WSL_LISTENER_NATIVE_CHECK_FAILED" {
+                        "Check Windows interface ownership; internet diagnose windows/wsl-selector"
                     } else if code == "TUN_NATIVE_STATE_MISMATCH" {
                         "internet diagnose windows/tun"
                     } else { "internet help" }}),
@@ -450,43 +477,48 @@ fn read_choice(prompt: &str) -> Option<String> {
     }
 }
 fn menu_status() {
-    let running = match lifecycle::is_running() {
+    let task = lifecycle::is_running();
+    let running = match task {
         Ok(true) => "RUNNING",
         Ok(false) => "STOPPED",
         Err(_) => "UNKNOWN",
     };
-    let win = selector::runtime_selected(Target::Desktop)
-        .map(|r| r.tag().to_owned())
-        .unwrap_or_else(|_| "UNKNOWN".into());
-    let wsl = selector::runtime_selected(Target::Wsl)
-        .map(|r| r.tag().to_owned())
-        .unwrap_or_else(|_| "UNKNOWN".into());
+    let saved = config::read(&config::installed()).ok();
+    let route = |target| {
+        let stored = saved.as_ref()
+            .and_then(|c| config::selected(c, target).ok())
+            .map(|r| r.tag().to_owned())
+            .unwrap_or_else(|| "NOT_CONFIGURED".into());
+        if matches!(task, Ok(true)) {
+            selector::runtime_selected(target)
+                .map(|r| r.tag().to_owned())
+                .unwrap_or_else(|_| format!("{stored} (runtime UNKNOWN)"))
+        } else if matches!(task, Ok(false)) {
+            format!("{stored} (INACTIVE)")
+        } else {
+            format!("{stored} (runtime UNKNOWN)")
+        }
+    };
     let state = tun::status().ok();
-    let tun_on = state
-        .as_ref()
-        .and_then(|s| s["managed_tun"].as_bool())
-        .map(|v| if v { "ON" } else { "OFF" })
-        .unwrap_or("UNKNOWN");
-    let selected = state
-        .as_ref()
-        .and_then(|s| s["selected_apps"].as_bool())
-        .map(|v| if v { "ON" } else { "OFF" })
-        .unwrap_or("UNKNOWN");
-    let count = state
-        .as_ref()
+    let switch = |key| match state.as_ref().and_then(|s| s[key].as_bool()) {
+        Some(false) => "OFF".to_owned(),
+        Some(true) if matches!(task, Ok(false)) => "ON saved / INACTIVE".into(),
+        Some(true) if matches!(task, Ok(true)) => "ON saved / runtime NOT_CHECKED".into(),
+        Some(true) => "ON saved / runtime UNKNOWN".into(),
+        None => "UNKNOWN".into(),
+    };
+    let count = state.as_ref()
         .and_then(|s| s["applications"].as_array())
         .map(|a| a.len().to_string())
         .unwrap_or_else(|| "?".into());
-    let vm = proxies::endpoint()
-        .map(|(ip, _)| ip)
-        .unwrap_or_else(|_| "?".into());
+    let vm = proxies::endpoint().map(|(ip, _)| ip).unwrap_or_else(|_| "?".into());
     println!("\n============ INTERNET ============");
-    println!("  sing-box:     {running}");
-    println!("  Windows:      {win}");
-    println!("  WSL:          {wsl}");
-    println!("  Managed TUN:  {tun_on}");
-    println!("  Selected:     {selected} ({count} apps)");
-    println!("  VM target:    {vm} (NOT_CHECKED)");
+    println!("sing-box:   {running}");
+    println!("Windows:    {}", route(Target::Desktop));
+    println!("WSL:        {} / channel NOT_CHECKED", route(Target::Wsl));
+    println!("TUN:        {}", switch("managed_tun"));
+    println!("Selected:   {} ({count} apps)", switch("selected_apps"));
+    println!("VM:         {vm} (NOT_CHECKED)");
 }
 fn menu_route(target: Target) -> Option<Vec<String>> {
     println!("\nChoose route (0 = back):");
@@ -512,25 +544,26 @@ fn menu_route(target: Target) -> Option<Vec<String>> {
     args.push(ROUTES[index - 1].to_owned());
     Some(args)
 }
+fn menu_wsl() -> Option<Vec<String>> {
+    println!("1. Route  2. Sync WSL listener (requires stopped sing-box)  0. Back");
+    match read_choice("WSL action: ")?.as_str() {
+        "1" => menu_route(Target::Wsl),
+        "2" => Some(vec!["wsl".into(), "sync".into()]),
+        "0" => Some(vec![]),
+        _ => Some(vec!["invalid".into()]),
+    }
+}
 fn menu() -> i32 {
     loop {
         menu_status();
-        println!("\n  1. Windows — route");
-        println!("  2. WSL     — route");
-        println!("  3. Start / stop sing-box");
-        println!("  4. Selected applications — show");
-        println!("  5. Add application");
-        println!("  6. Remove application");
-        println!("  7. Selected Apps — ON/OFF");
-        println!("  8. Managed TUN   — ON/OFF");
-        println!("  9. Six proxies — addresses / ports");
-        println!(" 10. Proxy login / password (local only)");
-        println!(" 11. Test six proxies (real HTTPS egress)");
-        println!(" 12. Status");
-        println!(" 13. Diagnose");
-        println!(" 14. Application — through VM");
-        println!(" 15. Application — direct internet");
-        println!(" 16. Application — inspect route");
+        println!("\n  1. Windows route        2. WSL route / sync");
+        println!("  3. Start / Stop        4. Selected Apps list");
+        println!("  5. Add application     6. Remove application");
+        println!("  7. Selected ON/OFF     8. Managed TUN ON/OFF");
+        println!("  9. Proxy addresses    10. Proxy credentials");
+        println!(" 11. Test 6 proxies     12. Status");
+        println!(" 13. Diagnose           14. App via VM");
+        println!(" 15. App direct         16. App route inspect");
         println!("  0. Exit");
         let Some(choice) = read_choice("\nChoice: ") else {
             return 0;
@@ -538,7 +571,7 @@ fn menu() -> i32 {
         let args = match choice.as_str() {
             "0" => return 0,
             "1" => menu_route(Target::Desktop),
-            "2" => menu_route(Target::Wsl),
+            "2" => menu_wsl(),
             "3" => {
                 println!("1. Start  2. Stop  3. Restart  0. Back");
                 read_choice("Action: ").map(|v| match v.as_str() {

@@ -6,7 +6,7 @@ use std::time::Duration;
 #[cfg(any(windows, test))]
 const DIAGNOSTIC_READBACK_TIMEOUT: Duration = Duration::from_millis(2200);
 #[cfg(any(windows, test))]
-const STARTUP_READBACK_TIMEOUT: Duration = Duration::from_secs(30);
+const WSL_SYNC_READBACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Network {
@@ -66,16 +66,37 @@ fn read_only_command_with_timeout(
     }
 }
 
+/// Native Windows bind is the source of local address ownership. No WSL process
+/// is spawned. The optional WSL inbound cannot prevent Desktop/TUN startup.
+#[cfg(windows)]
+pub fn windows_start_config(current: &serde_json::Value) -> Result<serde_json::Value, &'static str> {
+    use std::io::ErrorKind;
+    let address: Ipv4Addr = current.pointer("/inbounds/1/listen")
+        .and_then(|v| v.as_str())
+        .ok_or("WSL_LISTENER_INVALID")?
+        .parse().map_err(|_| "WSL_LISTENER_INVALID")?;
+    if address.is_loopback() {
+        return Ok(current.clone());
+    }
+    match std::net::TcpListener::bind((address, 0)) {
+        Ok(socket) => {
+            drop(socket);
+            Ok(current.clone())
+        }
+        Err(e) if e.kind() == ErrorKind::AddrNotAvailable => crate::config::with_wsl_loopback(current),
+        Err(_) => Err("WSL_LISTENER_NATIVE_CHECK_FAILED"),
+    }
+}
 #[cfg(windows)]
 pub fn discover() -> Result<Option<Network>, &'static str> {
     discover_with_deadline(None)
 }
 
-/// Starting Ubuntu after reboot can exceed a diagnostic probe's short timeout.
-/// Share one bounded startup budget across guest discovery and gateway ownership.
+/// Only an explicit WSL sync starts Ubuntu; Windows startup never calls it.
+/// Share one bounded budget across guest discovery and gateway ownership.
 #[cfg(windows)]
 pub fn discover_for_start() -> Result<Option<Network>, &'static str> {
-    discover_with_deadline(Some(std::time::Instant::now() + STARTUP_READBACK_TIMEOUT))
+    discover_with_deadline(Some(std::time::Instant::now() + WSL_SYNC_READBACK_TIMEOUT))
 }
 
 #[cfg(windows)]
@@ -239,8 +260,8 @@ mod tests {
         }
     }
     #[test]
-    fn startup_accepts_readback_slower_than_diagnostic_budget() {
-        let output = read_only_command_with_timeout(slow_readback(), STARTUP_READBACK_TIMEOUT)
+    fn explicit_sync_accepts_readback_slower_than_diagnostic_budget() {
+        let output = read_only_command_with_timeout(slow_readback(), WSL_SYNC_READBACK_TIMEOUT)
             .expect("slow but successful readback must be accepted during start");
         assert!(output.status.success());
     }

@@ -123,6 +123,22 @@ mod native {
             .map(|n| n > 0)
             .map_err(|_| "PROCESS_INVENTORY_FAILED")
     }
+    // Native sing-box validates the candidate before the single config is written.
+    fn checked_replace(path: &Path, current: &serde_json::Value, updated: &serde_json::Value) -> Result<(), &'static str> {
+        if current == updated {
+            return Ok(());
+        }
+        let check_path = path.parent().ok_or("CONFIG_PATH_INVALID")?.join("sing-box.wsl-check.json");
+        if check_path.exists() {
+            return Err("CONFIG_CHECK_CONFLICT");
+        }
+        fs::write(&check_path, serde_json::to_vec(updated).map_err(|_| "CONFIG_SERIALIZE_FAILED")?)
+            .map_err(|_| "CONFIG_CHECK_WRITE_FAILED")?;
+        let test = native_check(&check_path);
+        let _ = fs::remove_file(&check_path);
+        test?;
+        config::write_checked(path, updated)
+    }
     fn ensure_task() -> Result<(), &'static str> {
         if task_receipt()?.is_some() {
             Ok(())
@@ -144,33 +160,12 @@ mod native {
         if other_processes()? {
             return Err("FOREIGN_SING_BOX_PROCESS");
         }
-        let network = crate::wsl::discover_for_start()?;
-        if let Some(ref net) = network {
-            let updated = config::with_wsl_gateway(&current, net.gateway)?;
-            if updated != current {
-                let check_path = path
-                    .parent()
-                    .ok_or("CONFIG_PATH_INVALID")?
-                    .join("sing-box.wsl-check.json");
-                if check_path.exists() {
-                    return Err("CONFIG_CHECK_CONFLICT");
-                }
-                fs::write(
-                    &check_path,
-                    serde_json::to_vec(&updated).map_err(|_| "CONFIG_SERIALIZE_FAILED")?,
-                )
-                .map_err(|_| "CONFIG_CHECK_WRITE_FAILED")?;
-                let test = native_check(&check_path);
-                let _ = fs::remove_file(&check_path);
-                test?;
-                config::write_checked(&path, &updated)?;
-            }
-        }
+        // Windows starts without WSL. Preserve a live, native-owned WSL listener;
+        // if its NAT gateway disappeared, restrict the optional inbound to loopback.
+        let updated = crate::wsl::windows_start_config(&current)?;
+        checked_replace(&path, &current, &updated)?;
         native_check(&path)?;
         ensure_task()?;
-        if let Some(ref net) = network {
-            crate::wsl::firewall_allow(net)?;
-        }
         let o = command("schtasks.exe", &["/Run", "/TN", TASK])?;
         if !o.status.success() {
             return Err("TASK_START_REJECTED");
@@ -188,6 +183,18 @@ mod native {
             }
             thread::sleep(Duration::from_millis(200));
         }
+    }
+    /// Operator-requested WSL attach; never part of Windows startup.
+    pub fn sync_wsl() -> Result<(), &'static str> {
+        if is_running()? {
+            return Err("WSL_SYNC_REQUIRES_STOP");
+        }
+        let network = crate::wsl::discover_for_start()?.ok_or("WSL_GUEST_UNAVAILABLE")?;
+        let path = config::installed();
+        let current = config::read(&path)?;
+        let updated = config::with_wsl_gateway(&current, network.gateway)?;
+        crate::wsl::firewall_allow(&network)?;
+        checked_replace(&path, &current, &updated)
     }
     pub fn stop() -> Result<(), &'static str> {
         if !is_running()? {
@@ -214,7 +221,7 @@ mod native {
     }
 }
 #[cfg(windows)]
-pub use native::{is_running, native_check, restart, start, stop};
+pub use native::{is_running, native_check, restart, start, stop, sync_wsl};
 
 #[cfg(not(windows))]
 pub fn is_running() -> Result<bool, &'static str> {
@@ -226,6 +233,10 @@ pub fn native_check(_: &Path) -> Result<(), &'static str> {
 }
 #[cfg(not(windows))]
 pub fn start() -> Result<(), &'static str> {
+    Err("WINDOWS_ONLY")
+}
+#[cfg(not(windows))]
+pub fn sync_wsl() -> Result<(), &'static str> {
     Err("WINDOWS_ONLY")
 }
 #[cfg(not(windows))]
