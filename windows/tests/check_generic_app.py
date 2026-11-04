@@ -46,7 +46,16 @@ def main():
             assert code == 0 and v["desired_route"] == "DIRECT", "U3_DIAGNOSE_INVALID"
             assert v["physical_egress"] == "NOT_TESTED_BY_STATUS", "U3_DIAGNOSE_FABRICATED_EGRESS"
             code, v = run("u3probe.exe", "vm")
-            assert code != 0 and v["reason_code"] == "APP_TUN_OFF_ENABLE_EXPLICITLY", "U3_HIDDEN_TUN_ENABLE"
+            assert code == 0 and v["ok"] and v["scope"] == "SAVED_INACTIVE", "U3_OFFLINE_VM_SAVE_FAILED"
+            assert v["application"].lower() == str(copied).lower(), "U3_OFFLINE_IDENTITY_MISMATCH"
+            assert CONFIG.read_bytes() == snapshot[0], "U3_OFFLINE_SAVE_MUTATED_SINGBOX"
+            saved = json.loads(TUN.read_text(encoding="utf-8"))
+            assert not saved["managed_tun"], "U3_HIDDEN_TUN_ENABLE"
+            assert str(copied).lower() in saved["applications"], "U3_SAVED_APP_NOT_FOUND"
+            code, v = run("list")
+            assert code == 0 and v["managed_tun"] is False and v["selected_apps"] is False, "U3_OFFLINE_SCOPE_MISMATCH"
+            code, v = run("u3probe.exe", "direct")
+            assert code == 0 and v["ok"], "U3_OFFLINE_REMOVE_FAILED"
             same(snapshot)
             code, v = run("not-running-u3.exe", "direct")
             assert code != 0 and v["reason_code"] == "APP_NOT_RUNNING_USE_FULL_PATH", "U3_UNKNOWN_NAME_ACCEPTED"
@@ -56,7 +65,7 @@ def main():
             code, v = run("list")
             assert code == 0 and v["ok"] and v["managed_tun"] is False, "U3_LIST_UNSAFE"
             print("U3_GENERIC_RUNNING_NAME_EXACT_PATH=PASS", flush=True)
-            print("U3_TUN_OFF_REFUSES_VM_NOOP_AND_UNKNOWN_NAMES=PASS", flush=True)
+            print("U3_TUN_OFF_SAVES_VM_WITHOUT_NETWORK_MUTATION=PASS", flush=True)
             print("U3_APP_DIAGNOSE_TRUTHFUL=PASS", flush=True)
             print("U3_NO_PER_APPLICATION_ALIAS=PASS", flush=True)
         finally:
