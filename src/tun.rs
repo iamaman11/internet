@@ -706,19 +706,43 @@ fn control_endpoints() -> Result<Vec<Ipv4Addr>, &'static str> {
 
 #[cfg(windows)]
 fn adapter_up() -> Result<bool, &'static str> {
-    let cmd = "(@(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object {$_.Name -eq 'internet-tun' -and $_.Status -eq 'Up'}).Count)";
-    let out = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", cmd])
-        .output()
-        .map_err(|_| "TUN_ADAPTER_READBACK_UNKNOWN")?;
-    if !out.status.success() {
+    use windows::Win32::NetworkManagement::{
+        IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2},
+        Ndis::IfOperStatusUp,
+    };
+
+    // Native OS-owned interface inventory, including hidden TUN adapters.
+    // No PowerShell process per status read; never infer "down" on API failure.
+    struct Table(*mut MIB_IF_TABLE2);
+    impl Drop for Table {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: GetIfTable2 owns this allocation until FreeMibTable.
+                unsafe { FreeMibTable(self.0.cast()) };
+            }
+        }
+    }
+    let mut raw = std::ptr::null_mut();
+    // SAFETY: the API fills an owned pointer; Table frees it on every path.
+    let result = unsafe { GetIfTable2(&mut raw) };
+    let table = Table(raw);
+    if result.0 != 0 || table.0.is_null() {
         return Err("TUN_ADAPTER_READBACK_UNKNOWN");
     }
-    match String::from_utf8_lossy(&out.stdout).trim() {
-        "0" => Ok(false),
-        "1" => Ok(true),
-        _ => Err("TUN_ADAPTER_READBACK_UNKNOWN"),
+    // SAFETY: GetIfTable2 returns a valid MIB_IF_TABLE2 with NumEntries rows.
+    let count = unsafe { (*table.0).NumEntries as usize };
+    if count > 16384 {
+        return Err("TUN_ADAPTER_READBACK_UNKNOWN");
     }
+    // SAFETY: Table is the first element of a contiguous, API-allocated array.
+    let rows = unsafe { std::slice::from_raw_parts((*table.0).Table.as_ptr(), count) };
+    for row in rows {
+        let len = row.Alias.iter().position(|ch| *ch == 0).unwrap_or(row.Alias.len());
+        if String::from_utf16_lossy(&row.Alias[..len]).eq_ignore_ascii_case("internet-tun") {
+            return Ok(row.OperStatus == IfOperStatusUp);
+        }
+    }
+    Ok(false)
 }
 #[cfg(not(windows))]
 fn adapter_up() -> Result<bool, &'static str> {
@@ -925,6 +949,16 @@ fn classify_tun_status(
 }
 
 pub fn inspect(id: &str) -> Diagnostic {
+    inspect_with_snapshot(id, &status(), None)
+}
+
+/// Reuse the same native readback for both independent switch diagnostics.
+/// The observation is scoped to one CLI invocation, not a persistent cache.
+pub(crate) fn inspect_with_snapshot(
+    id: &str,
+    observed: &Result<Value, &'static str>,
+    task: Option<&Result<bool, &'static str>>,
+) -> Diagnostic {
     let mut d = Diagnostic::unknown(
         id,
         "switch",
@@ -938,7 +972,7 @@ pub fn inspect(id: &str) -> Diagnostic {
     if !cfg!(windows) {
         return d;
     }
-    match status() {
+    match observed {
         Ok(v) => {
             d.observed_at = Some(chrono::Utc::now().to_rfc3339());
             d.expected = Some("desired/native config and actual adapter agree".into());
@@ -954,7 +988,7 @@ pub fn inspect(id: &str) -> Diagnostic {
                 v["desired_native_match"] == true,
                 v["managed_tun"] == true,
                 v["native_tun_up"] == true,
-                crate::lifecycle::is_running(),
+                task.copied().unwrap_or_else(crate::lifecycle::is_running),
             );
             d.health = health;
             d.reason_code = reason;

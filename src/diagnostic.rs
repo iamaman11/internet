@@ -32,6 +32,7 @@ pub fn batch(ids: &[&str], deep: bool) -> Vec<Diagnostic> {
         matches!(
             *id,
             "windows/sing-box" | "windows/desktop-selector" | "windows/wsl-selector"
+                | "windows/tun" | "windows/selected-apps"
         )
     });
     let task = if needs_task && cfg!(windows) {
@@ -39,10 +40,19 @@ pub fn batch(ids: &[&str], deep: bool) -> Vec<Diagnostic> {
     } else {
         None
     };
+    // The same adapter/desired/task observation serves both switch resources.
+    // Read once per command, even for deep diagnosis; never cache across calls.
+    let switch_snapshot = if cfg!(windows)
+        && ids.iter().any(|id| matches!(*id, "windows/tun" | "windows/selected-apps"))
+    {
+        Some(tun::status())
+    } else {
+        None
+    };
     if !deep || !cfg!(windows) {
         return ids
             .iter()
-            .map(|id| inspect_with_task(id, deep, task.as_ref()))
+            .map(|id| inspect_with_task(id, deep, task.as_ref(), switch_snapshot.as_ref()))
             .collect();
     }
     // Run independent real HTTPS probes at the same time as native local readback.
@@ -78,7 +88,7 @@ pub fn batch(ids: &[&str], deep: bool) -> Vec<Diagnostic> {
     };
     let mut results: Vec<_> = ids
         .iter()
-        .map(|id| inspect_with_task(id, deep, task.as_ref()))
+        .map(|id| inspect_with_task(id, deep, task.as_ref(), switch_snapshot.as_ref()))
         .collect();
     // Guest-originating authenticated HTTPS is only attempted after the
     // existing WSL boundary check proved selector ownership, binding and 407.
@@ -443,7 +453,7 @@ fn line2_egress(config: serde_json::Value, deadline: Instant) -> Line2Result {
 }
 
 pub fn inspect(id: &str, deep: bool) -> Diagnostic {
-    inspect_with_task(id, deep, None)
+    inspect_with_task(id, deep, None, None)
 }
 fn task_running(task: Option<&Result<bool, &'static str>>) -> Result<bool, &'static str> {
     match task {
@@ -466,6 +476,7 @@ fn inspect_with_task(
     id: &str,
     deep: bool,
     task: Option<&Result<bool, &'static str>>,
+    switch_snapshot: Option<&Result<serde_json::Value, &'static str>>,
 ) -> Diagnostic {
     match id {
         "internet" => node(id, "application", "Rust INTERNET", None, "internet status"),
@@ -490,7 +501,10 @@ fn inspect_with_task(
         "windows/sing-box" => local_binary(task),
         "windows/desktop-selector" => local_selector(id, Target::Desktop, deep, task),
         "windows/wsl-selector" => local_selector(id, Target::Wsl, deep, task),
-        "windows/tun" | "windows/selected-apps" => tun::inspect(id),
+        "windows/tun" | "windows/selected-apps" => match switch_snapshot {
+            Some(observed) => tun::inspect_with_snapshot(id, observed, task),
+            None => tun::inspect(id),
+        },
         _ => node(
             id,
             "unknown",
@@ -741,6 +755,19 @@ pub fn all(deep: bool) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn both_switches_reuse_one_failed_snapshot_without_masking_unknown() {
+        let bad: Result<serde_json::Value, &'static str> = Err("TUN_STATE_JSON_INVALID");
+        let stopped: Result<bool, &'static str> = Ok(false);
+        let tun = tun::inspect_with_snapshot("windows/tun", &bad, Some(&stopped));
+        let apps = tun::inspect_with_snapshot("windows/selected-apps", &bad, Some(&stopped));
+        assert_eq!(tun.reason_code, "TUN_STATE_INVALID");
+        assert_eq!(tun.reason_code, apps.reason_code);
+        assert_eq!(tun.health, Health::Unknown);
+        assert_eq!(apps.health, Health::Unknown);
+        assert_ne!(tun.resource_id, apps.resource_id);
+    }
     #[test]
     fn wsl_egress_input_enforces_binding_auth_and_route_without_secrets_in_output() {
         let mut c = serde_json::json!({
