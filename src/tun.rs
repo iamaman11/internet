@@ -906,6 +906,24 @@ pub fn status() -> Result<Value, &'static str> {
     )
 }
 
+/// An intentionally stopped Task is not a native configuration mismatch.
+fn classify_tun_status(
+    desired_matches_config: bool,
+    desired: bool,
+    adapter_up: bool,
+    task: Result<bool, &'static str>,
+) -> (Health, &'static str) {
+    if !desired_matches_config || (matches!(task, Ok(false)) && adapter_up) {
+        return (Health::Failed, "TUN_NATIVE_STATE_MISMATCH");
+    }
+    match task {
+        Err(_) => (Health::Unknown, "TASK_READBACK_UNKNOWN"),
+        Ok(false) if desired => (Health::Degraded, "SING_BOX_STOPPED_TUN_INACTIVE"),
+        Ok(_) if desired == adapter_up => (Health::Healthy, "TUN_NATIVE_STATE_CONFIRMED"),
+        _ => (Health::Failed, "TUN_NATIVE_STATE_MISMATCH"),
+    }
+}
+
 pub fn inspect(id: &str) -> Diagnostic {
     let mut d = Diagnostic::unknown(
         id,
@@ -932,21 +950,18 @@ pub fn inspect(id: &str) -> Diagnostic {
                 v["selected_apps"],
                 v["applications"].as_array().map_or(0, Vec::len)
             ));
-            let good = v["desired_native_match"] == true && v["managed_tun"] == v["native_tun_up"];
-            d.health = if good {
-                Health::Healthy
-            } else {
-                Health::Failed
-            };
-            d.reason_code = if good {
-                "TUN_NATIVE_STATE_CONFIRMED"
-            } else {
-                "TUN_NATIVE_STATE_MISMATCH"
-            };
-            d.next_action = if good {
-                "internet tun status"
-            } else {
-                "internet diagnose windows/tun"
+            let (health, reason) = classify_tun_status(
+                v["desired_native_match"] == true,
+                v["managed_tun"] == true,
+                v["native_tun_up"] == true,
+                crate::lifecycle::is_running(),
+            );
+            d.health = health;
+            d.reason_code = reason;
+            d.next_action = match reason {
+                "SING_BOX_STOPPED_TUN_INACTIVE" => "internet start",
+                "TUN_NATIVE_STATE_CONFIRMED" => "internet tun status",
+                _ => "internet diagnose windows/tun",
             };
         }
         Err(code) => {
@@ -967,6 +982,34 @@ pub fn inspect(id: &str) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopped_task_is_degraded_not_a_false_tun_failure() {
+        assert_eq!(
+            classify_tun_status(true, true, false, Ok(false)),
+            (Health::Degraded, "SING_BOX_STOPPED_TUN_INACTIVE")
+        );
+        assert_eq!(
+            classify_tun_status(true, false, false, Ok(false)),
+            (Health::Healthy, "TUN_NATIVE_STATE_CONFIRMED")
+        );
+        assert_eq!(
+            classify_tun_status(true, true, true, Ok(false)),
+            (Health::Failed, "TUN_NATIVE_STATE_MISMATCH")
+        );
+        assert_eq!(
+            classify_tun_status(true, true, false, Ok(true)),
+            (Health::Failed, "TUN_NATIVE_STATE_MISMATCH")
+        );
+        assert_eq!(
+            classify_tun_status(true, true, true, Err("TASK_READBACK_FAILED")),
+            (Health::Unknown, "TASK_READBACK_UNKNOWN")
+        );
+        assert_eq!(
+            classify_tun_status(false, false, false, Ok(true)),
+            (Health::Failed, "TUN_NATIVE_STATE_MISMATCH")
+        );
+    }
     #[test]
     fn two_switches_are_independent_and_inert_list_does_not_start_tun() {
         let s = Settings::default();

@@ -180,7 +180,7 @@ mod native {
         if !o.status.success() {
             return Err("TASK_START_REJECTED");
         }
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if is_running()?
                 && crate::selector::runtime_selected(crate::model::Target::Desktop).is_ok()
@@ -214,7 +214,7 @@ mod native {
         if !o.status.success() {
             return Err("TASK_STOP_REJECTED");
         }
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             if !is_running()? {
                 return Ok(());

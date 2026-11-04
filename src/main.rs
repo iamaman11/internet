@@ -503,18 +503,25 @@ fn menu_status() {
             format!("{stored} (runtime UNKNOWN)")
         }
     };
-    let state = tun::status().ok();
-    let switch = |key| match state.as_ref().and_then(|s| s[key].as_bool()) {
-        Some(false) => "OFF".to_owned(),
-        Some(true) if matches!(task, Ok(false)) => "ON saved / INACTIVE".into(),
-        Some(true) if matches!(task, Ok(true)) => "ON saved / runtime NOT_CHECKED".into(),
-        Some(true) => "ON saved / runtime UNKNOWN".into(),
-        None => "UNKNOWN".into(),
+    // The menu is a cheap desired-state snapshot; native adapter readback
+    // belongs to status/diagnose rather than every menu redraw.
+    let state = tun::read_at(&tun::path()).ok();
+    let switch = |key| {
+        let desired = state.as_ref().map(|s| match key {
+            "managed_tun" => s.managed_tun,
+            _ => s.selected_apps,
+        });
+        match desired {
+            Some(false) => "OFF".to_owned(),
+            Some(true) if matches!(task, Ok(false)) => "ON saved / INACTIVE".into(),
+            Some(true) if matches!(task, Ok(true)) => "ON saved / runtime NOT_CHECKED".into(),
+            Some(true) => "ON saved / runtime UNKNOWN".into(),
+            None => "UNKNOWN".into(),
+        }
     };
     let count = state
         .as_ref()
-        .and_then(|s| s["applications"].as_array())
-        .map(|a| a.len().to_string())
+        .map(|s| s.applications.len().to_string())
         .unwrap_or_else(|| "?".into());
     let vm = proxies::endpoint()
         .map(|(ip, _)| ip)
