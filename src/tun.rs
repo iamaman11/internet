@@ -572,10 +572,11 @@ pub fn running_apps() -> Result<Value, &'static str> {
     let raw = String::from_utf8(output.stdout).map_err(|_| "APP_PROCESS_QUERY_FAILED")?;
     let mut paths = Vec::new();
     for raw_path in raw.lines().map(str::trim).filter(|s| !s.is_empty()) {
-        if let Ok(path) = application(raw_path) {
-            if path.contains('\\') && !paths.contains(&path) {
-                paths.push(path);
-            }
+        if let Ok(path) = application(raw_path)
+            && path.contains('\\')
+            && !paths.contains(&path)
+        {
+            paths.push(path);
         }
     }
     paths.sort();
@@ -888,10 +889,10 @@ fn persist(
     let configured = current["inbounds"].as_array().is_some_and(|v| v.len() == 3);
     let confirm_native = || -> Result<(), &'static str> {
         verify_native(next.managed_tun)?;
-        if let Some(expected) = desktop_route {
-            if crate::selector::runtime_selected(crate::model::Target::Desktop)? != expected {
-                return Err("WINDOWS_MODE_ROUTE_UNCONFIRMED");
-            }
+        if let Some(expected) = desktop_route
+            && crate::selector::runtime_selected(crate::model::Target::Desktop)? != expected
+        {
+            return Err("WINDOWS_MODE_ROUTE_UNCONFIRMED");
         }
         Ok(())
     };
