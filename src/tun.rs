@@ -887,6 +887,15 @@ fn persist(
     };
     let route_changed = planned != current;
     let configured = current["inbounds"].as_array().is_some_and(|v| v.len() == 3);
+    let confirm_native = || -> Result<(), &'static str> {
+        verify_native(next.managed_tun)?;
+        if let Some(expected) = desktop_route {
+            if crate::selector::runtime_selected(crate::model::Target::Desktop)? != expected {
+                return Err("WINDOWS_MODE_ROUTE_UNCONFIRMED");
+            }
+        }
+        Ok(())
+    };
     // A crash after native apply but before state persistence must not trap
     // Windows in a TUN that "tun off" refuses to remove.
     let recovering = configured != old.managed_tun;
@@ -894,6 +903,9 @@ fn persist(
         return Err("TUN_DESIRED_NATIVE_DRIFT");
     }
     if old == next && !recovering && !route_changed {
+        if desktop_route.is_some() {
+            confirm_native()?;
+        }
         return Ok(
             json!({"ok":true,"changed":false,"managed_tun":old.managed_tun,
             "selected_apps":old.selected_apps,"applications":old.applications,
@@ -959,7 +971,7 @@ fn persist(
             let outcome = (|| {
                 config::write_checked(&config::installed(), &updated)?;
                 crate::lifecycle::start()?;
-                verify_native(next.managed_tun)
+                confirm_native()
             })();
             if outcome.is_err() {
                 let rollback = config::write_checked(&config::installed(), &current)
@@ -972,7 +984,7 @@ fn persist(
                 });
             }
         } else {
-            verify_native(next.managed_tun)?;
+            confirm_native()?;
         }
         if write_at(path, next).is_err() {
             let rollback = config::write_checked(&config::installed(), &current)
