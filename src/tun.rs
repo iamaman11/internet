@@ -332,7 +332,7 @@ pub fn validate_native(c: &Value, on: bool) -> Result<(), &'static str> {
     let addresses = addresses
         .as_array()
         .ok_or("TUN_CONTROL_EXCLUSION_INVALID")?;
-    if addresses.len() < 2 || addresses.len() > 9 {
+    if addresses.is_empty() || addresses.len() > 9 {
         return Err("TUN_CONTROL_EXCLUSION_INVALID");
     }
     let vm = c["outbounds"][0]["server"]
@@ -451,9 +451,6 @@ pub fn render_native(
         if !exclusions.contains(ip) {
             exclusions.push(*ip)
         }
-    }
-    if exclusions.len() < 2 {
-        return Err("TUN_CONTROL_NOT_INDEPENDENT");
     }
     let cidrs: Vec<String> = exclusions.iter().map(|ip| format!("{ip}/32")).collect();
     c["inbounds"].as_array_mut().unwrap().push(json!({
@@ -723,13 +720,39 @@ pub fn app_diagnose(raw: &str) -> Result<Value, &'static str> {
 
 #[cfg(windows)]
 fn control_endpoints() -> Result<Vec<Ipv4Addr>, &'static str> {
-    let script = r#"$p=@(Get-CimInstance Win32_Process -Filter "Name='tunnel-client-runtime.exe'" | Where-Object {$_.ExecutablePath -like '*\WindowsAdminMCP\client\tunnel-client-runtime.exe'}); if($p.Count -ne 1){exit 5}; @(Get-NetTCPConnection -State Established -ErrorAction Stop | Where-Object {$_.OwningProcess -eq $p[0].ProcessId} | Select-Object -ExpandProperty RemoteAddress -Unique)"#;
+    // Distinct IP addresses do not prove independent routing: the Windows
+    // Admin MCP control endpoint may legitimately be the same Vultr VM as
+    // the data plane. Verify the established control socket uses the native
+    // physical interface and source address before preparing TUN exclusions.
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$p = @(Get-CimInstance Win32_Process -Filter "Name='tunnel-client-runtime.exe'" |
+    Where-Object {$_.ExecutablePath -like '*\WindowsAdminMCP\client\tunnel-client-runtime.exe'})
+if ($p.Count -ne 1) { exit 5 }
+$sockets = @(Get-NetTCPConnection -State Established -ErrorAction Stop |
+    Where-Object {$_.OwningProcess -eq $p[0].ProcessId})
+if ($sockets.Count -eq 0) { exit 6 }
+foreach ($socket in $sockets) {
+    $route = @(Find-NetRoute -RemoteIPAddress $socket.RemoteAddress -ErrorAction Stop)
+    $source = @($route | Where-Object {$null -ne $_.PSObject.Properties['IPAddress']})
+    $next = @($route | Where-Object {$null -ne $_.PSObject.Properties['DestinationPrefix']})
+    if ($source.Count -ne 1 -or $next.Count -lt 1) { exit 9 }
+    if ($source[0].IPAddress -ne $socket.LocalAddress -or
+        $source[0].InterfaceAlias -eq 'internet-tun' -or
+        $next[0].InterfaceAlias -ne $source[0].InterfaceAlias) { exit 9 }
+    $socket.RemoteAddress
+}
+"#;
     let out = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()
         .map_err(|_| "TUN_CONTROL_QUERY_FAILED")?;
     if !out.status.success() {
-        return Err("TUN_CONTROL_NOT_CONNECTED");
+        return Err(if out.status.code() == Some(9) {
+            "TUN_CONTROL_ROUTE_NOT_DIRECT"
+        } else {
+            "TUN_CONTROL_NOT_CONNECTED"
+        });
     }
     let text = String::from_utf8(out.stdout).map_err(|_| "TUN_CONTROL_QUERY_FAILED")?;
     let mut ips = Vec::new();
