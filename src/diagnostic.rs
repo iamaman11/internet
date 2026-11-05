@@ -697,7 +697,7 @@ fn local_selector(
                             if actual != n.gateway.to_string() {
                                 d.health = Health::Failed;
                                 d.reason_code = "WSL_BINDING_STALE";
-                                d.next_action = "internet restart";
+                                d.next_action = "internet stop; internet wsl sync; internet start";
                             } else {
                                 match crate::wsl::probe(&n) {
                                     Ok(()) => {
@@ -729,8 +729,22 @@ fn local_selector(
                         Ok(None) => {
                             d.reason_code = "WSL_NOT_INSTALLED";
                         }
+                        Err("WSL_READBACK_TIMEOUT") => {
+                            d.reason_code = "WSL_NETWORK_READBACK_TIMEOUT";
+                            d.next_action = "Start Ubuntu normally, then retry WSL diagnose";
+                        }
+                        Err("WSL_GATEWAY_NOT_OWNED") => {
+                            d.health = Health::Failed;
+                            d.reason_code = "WSL_GATEWAY_NOT_OWNED";
+                            d.next_action = "Inspect Windows WSL vEthernet before WSL sync";
+                        }
+                        Err("WSL_NETWORK_READBACK_INVALID" | "WSL_NETWORK_SCOPE_INVALID") => {
+                            d.reason_code = "WSL_NETWORK_READBACK_INVALID";
+                            d.next_action = "Inspect Ubuntu IPv4 address and default route";
+                        }
                         Err(_) => {
                             d.reason_code = "WSL_NETWORK_READBACK_UNKNOWN";
+                            d.next_action = "Inspect Ubuntu startup and native WSL network";
                         }
                     }
                 }
