@@ -1,5 +1,16 @@
 //! Native WSL networking adapter. No agent, no WSL sing-box, no permanent service.
 use std::net::Ipv4Addr;
+#[cfg(any(windows, test))]
+use std::time::Duration;
+
+#[cfg(any(windows, test))]
+const DIAGNOSTIC_READBACK_TIMEOUT: Duration = Duration::from_millis(2200);
+/// One deadline for both native WSL guest discovery and Windows NIC ownership.
+/// A cold Ubuntu startup may take longer than a warm per-process probe.
+#[cfg(windows)]
+const WSL_DIAGNOSE_DISCOVERY_BUDGET: Duration = Duration::from_millis(6500);
+#[cfg(any(windows, test))]
+const WSL_SYNC_READBACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Network {
@@ -21,8 +32,14 @@ pub fn validate_ips(guest: &str, gateway: &str) -> Result<Network, &'static str>
     Ok(Network { guest, gateway })
 }
 #[cfg(windows)]
-fn read_only_command(
+fn read_only_command(command: std::process::Command) -> Result<std::process::Output, &'static str> {
+    read_only_command_with_timeout(command, DIAGNOSTIC_READBACK_TIMEOUT)
+}
+
+#[cfg(any(windows, test))]
+fn read_only_command_with_timeout(
     mut command: std::process::Command,
+    timeout: Duration,
 ) -> Result<std::process::Output, &'static str> {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -31,7 +48,7 @@ fn read_only_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let mut child = command.spawn().map_err(|_| "WSL_READBACK_UNAVAILABLE")?;
-    let until = Instant::now() + Duration::from_millis(2200);
+    let until = Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => {
@@ -53,14 +70,66 @@ fn read_only_command(
     }
 }
 
+/// Native Windows bind is the source of local address ownership. No WSL process
+/// is spawned. The optional WSL inbound cannot prevent Desktop/TUN startup.
+#[cfg(windows)]
+pub fn windows_start_config(
+    current: &serde_json::Value,
+) -> Result<serde_json::Value, &'static str> {
+    use std::io::ErrorKind;
+    let address: Ipv4Addr = current
+        .pointer("/inbounds/1/listen")
+        .and_then(|v| v.as_str())
+        .ok_or("WSL_LISTENER_INVALID")?
+        .parse()
+        .map_err(|_| "WSL_LISTENER_INVALID")?;
+    if address.is_loopback() {
+        return Ok(current.clone());
+    }
+    match std::net::TcpListener::bind((address, 0)) {
+        Ok(socket) => {
+            drop(socket);
+            Ok(current.clone())
+        }
+        Err(e) if e.kind() == ErrorKind::AddrNotAvailable => {
+            crate::config::with_wsl_loopback(current)
+        }
+        Err(_) => Err("WSL_LISTENER_NATIVE_CHECK_FAILED"),
+    }
+}
 #[cfg(windows)]
 pub fn discover() -> Result<Option<Network>, &'static str> {
+    // A bounded diagnostic readback is independent of Windows start.
+    // Share the budget between the WSL guest and Windows ownership probe;
+    // two separate full timeouts would multiply the worst-case duration.
+    discover_with_deadline(Some(
+        std::time::Instant::now() + WSL_DIAGNOSE_DISCOVERY_BUDGET,
+    ))
+}
+
+/// Only an explicit WSL sync starts Ubuntu; Windows startup never calls it.
+/// Share one bounded budget across guest discovery and gateway ownership.
+#[cfg(windows)]
+pub fn discover_for_start() -> Result<Option<Network>, &'static str> {
+    discover_with_deadline(Some(std::time::Instant::now() + WSL_SYNC_READBACK_TIMEOUT))
+}
+
+#[cfg(windows)]
+fn discover_with_deadline(
+    startup_deadline: Option<std::time::Instant>,
+) -> Result<Option<Network>, &'static str> {
     use std::process::Command;
+    let readback = |command| {
+        let timeout = startup_deadline
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap_or(DIAGNOSTIC_READBACK_TIMEOUT);
+        read_only_command_with_timeout(command, timeout)
+    };
     // Read only: two IPv4 observations from the existing Ubuntu instance.
     let script = "import subprocess,socket; r=subprocess.check_output(['ip','-4','route','show','default'],text=True).split(); g=r[r.index('via')+1]; a=subprocess.check_output(['hostname','-I'],text=True).split(); print(a[0]+' '+g)";
     let mut command = Command::new("wsl.exe");
     command.args(["-d", "Ubuntu", "--", "/usr/bin/python3", "-c", script]);
-    let output = read_only_command(command)?;
+    let output = readback(command)?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -77,12 +146,17 @@ pub fn discover() -> Result<Option<Network>, &'static str> {
     );
     let mut native = Command::new("powershell.exe");
     native.args(["-NoProfile", "-NonInteractive", "-Command", &command]);
-    let check = read_only_command(native)?;
+    let check = readback(native)?;
     if !check.status.success() {
         return Err("WSL_GATEWAY_NOT_OWNED");
     }
     Ok(Some(network))
 }
+#[cfg(not(windows))]
+pub fn discover_for_start() -> Result<Option<Network>, &'static str> {
+    Ok(None)
+}
+
 #[cfg(not(windows))]
 pub fn discover() -> Result<Option<Network>, &'static str> {
     Ok(None)
@@ -181,6 +255,38 @@ pub fn probe(_: &Network) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A disposable test subprocess stands in for a slow native WSL readback.
+    // It never starts WSL or touches the installed application/network.
+    fn slow_readback() -> std::process::Command {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "wsl::tests::readback_delay_fixture",
+            "--nocapture",
+        ]);
+        command.env("INTERNET_WSL_DELAY_FIXTURE", "1");
+        command
+    }
+    #[test]
+    fn readback_delay_fixture() {
+        if std::env::var_os("INTERNET_WSL_DELAY_FIXTURE").is_some() {
+            std::thread::sleep(DIAGNOSTIC_READBACK_TIMEOUT + Duration::from_millis(300));
+        }
+    }
+    #[test]
+    fn explicit_sync_accepts_readback_slower_than_diagnostic_budget() {
+        let output = read_only_command_with_timeout(slow_readback(), WSL_SYNC_READBACK_TIMEOUT)
+            .expect("slow but successful readback must be accepted during start");
+        assert!(output.status.success());
+    }
+    #[test]
+    fn diagnostics_still_reject_slow_readback() {
+        let error = read_only_command_with_timeout(slow_readback(), DIAGNOSTIC_READBACK_TIMEOUT)
+            .unwrap_err();
+        assert_eq!(error, "WSL_READBACK_TIMEOUT");
+    }
+
     #[test]
     fn wsl_http_auth_challenge_is_required() {
         assert!(classify_auth_reply("AUTH_REQUIRED\n").is_ok());

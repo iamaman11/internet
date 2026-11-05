@@ -219,6 +219,17 @@ pub fn with_wsl_gateway(
     if !gateway.is_private() || gateway.is_loopback() {
         return Err("WSL_GATEWAY_INVALID");
     }
+    with_wsl_listen(original, gateway)
+}
+/// Explicit degradation of the optional WSL listener, never Desktop/TUN.
+pub fn with_wsl_loopback(original: &Value) -> Result<Value, &'static str> {
+    with_wsl_listen(original, std::net::Ipv4Addr::LOCALHOST)
+}
+fn with_wsl_listen(original: &Value, address: std::net::Ipv4Addr) -> Result<Value, &'static str> {
+    validate(original)?;
+    if !address.is_loopback() && !address.is_private() {
+        return Err("WSL_GATEWAY_INVALID");
+    }
     let mut next = original.clone();
     let inbound = next
         .get_mut("inbounds")
@@ -227,7 +238,7 @@ pub fn with_wsl_gateway(
         .iter_mut()
         .find(|v| v["tag"] == "wsl-in")
         .ok_or("CONFIG_INBOUND_UNSAFE")?;
-    inbound["listen"] = Value::String(gateway.to_string());
+    inbound["listen"] = Value::String(address.to_string());
     validate(&next)?;
     Ok(next)
 }
@@ -367,6 +378,22 @@ mod tests {
         assert_eq!(validate(&bad), Err("CONFIG_WSL_AUTH_REQUIRED"));
     }
     #[test]
+    fn dead_wsl_listener_falls_back_only_to_safe_loopback() {
+        let original = fixture();
+        let address: std::net::Ipv4Addr = "172.26.16.1".parse().unwrap();
+        let current = with_wsl_gateway(&original, address).unwrap();
+        let fallback = with_wsl_loopback(&current).unwrap();
+        assert_eq!(fallback["inbounds"][1]["listen"], "127.0.0.1");
+        assert_eq!(
+            fallback["inbounds"][1]["users"],
+            current["inbounds"][1]["users"]
+        );
+        assert_eq!(fallback["inbounds"][0], current["inbounds"][0]);
+        assert_eq!(fallback["outbounds"], current["outbounds"]);
+        assert_eq!(fallback["route"], current["route"]);
+        assert_eq!(with_wsl_loopback(&fallback).unwrap(), fallback);
+    }
+    #[test]
     fn target_changes_do_not_touch_other_selector() {
         let c = fixture();
         assert!(validate(&c).is_ok());
@@ -423,6 +450,26 @@ mod tests {
         let active = toggle_state(&with_apps, Switch::ManagedTun, true).unwrap();
         let all_traffic = toggle_state(&off, Switch::ManagedTun, true).unwrap();
         let all_native = render_native(&initial, &all_traffic, &[control]).unwrap();
+        // A single shared VM/control IP is safe when the actual control
+        // socket is physically routed outside the TUN (Windows preflight).
+        let shared: std::net::Ipv4Addr = "64.176.74.102".parse().unwrap();
+        let shared_native = render_native(&initial, &all_traffic, &[shared]).unwrap();
+        assert_eq!(
+            shared_native["inbounds"][2]["route_exclude_address"],
+            serde_json::json!(["64.176.74.102/32"])
+        );
+        validate(&shared_native).unwrap();
+        let selected_shared = render_native(&initial, &active, &[shared]).unwrap();
+        validate(&selected_shared).unwrap();
+        assert_eq!(
+            render_native(&initial, &active, &[]).unwrap_err(),
+            "TUN_CONTROL_NOT_CONNECTED"
+        );
+        let invalid_control: std::net::Ipv4Addr = "10.0.0.10".parse().unwrap();
+        assert_eq!(
+            render_native(&initial, &active, &[invalid_control]),
+            Err("TUN_CONTROL_IP_UNSAFE")
+        );
         assert_eq!(all_native["route"]["rules"].as_array().unwrap().len(), 3);
         assert_eq!(
             all_native["route"]["rules"][2]["outbound"],
