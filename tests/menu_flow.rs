@@ -84,7 +84,9 @@ fn menu_uses_one_column_and_explains_full_tun_scope() {
     assert!(first_menu.contains("Windows egress: NOT TESTED"));
     assert!(first_menu.contains("WSL:           proxy-only /"));
     let normalized = stdout.replace("\r\n", "\n");
-    assert!(normalized.contains("1. ALL captured Windows traffic -> VM (DIRECT; control IPs excluded)"));
+    assert!(
+        normalized.contains("1. ALL captured Windows traffic -> VM (DIRECT; control IPs excluded)")
+    );
     assert!(!normalized.contains("4. Choose DIRECT / WARP route"));
     assert!(normalized.contains("2. Choose running Windows application"));
     assert!(normalized.contains("1. Start\n2. Stop"));
