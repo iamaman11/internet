@@ -65,7 +65,7 @@ fn menu_uses_one_column_and_explains_full_tun_scope() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     let first_menu = stdout.split("Choice: ").next().unwrap();
-    for number in 1..=10 {
+    for number in 1..=8 {
         let prefix = format!(" {:>2}. ", number);
         assert_eq!(
             first_menu
@@ -80,9 +80,12 @@ fn menu_uses_one_column_and_explains_full_tun_scope() {
     assert!(first_menu.contains("  2. Manage applications"));
     assert!(!first_menu.contains("Add application"));
     assert!(!first_menu.contains("Remove application"));
-    assert!(first_menu.contains("TUN scope (saved):"));
+    assert!(first_menu.contains("Windows mode:"));
+    assert!(first_menu.contains("Windows egress: NOT TESTED"));
+    assert!(first_menu.contains("WSL:           proxy-only /"));
     let normalized = stdout.replace("\r\n", "\n");
-    assert!(normalized.contains("1. All TUN-captured Windows traffic via VM (DIRECT)"));
+    assert!(normalized.contains("1. ALL captured Windows traffic -> VM (DIRECT; control IPs excluded)"));
+    assert!(!normalized.contains("4. Choose DIRECT / WARP route"));
     assert!(normalized.contains("2. Choose running Windows application"));
     assert!(normalized.contains("1. Start\n2. Stop"));
     assert!(normalized.contains("1. Route via VM (save VM selection)"));
@@ -106,4 +109,23 @@ fn end_of_input_exits_without_repeating_forever() {
             .count(),
         1
     );
+}
+
+#[test]
+fn wsl_menu_does_not_pretend_to_tunnel_unconfigured_ubuntu_clients() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_internet"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("CLI executable");
+    child.stdin.take().unwrap().write_all(b"4\n0\n0\n").unwrap();
+    let output = child.wait_with_output().expect("menu ended");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("WSL / UBUNTU (EXPLICIT PROXY)"));
+    assert!(stdout.contains("Only Ubuntu clients configured for this proxy"));
+    assert!(stdout.contains("Unconfigured Ubuntu clients retain normal direct internet."));
+    assert!(stdout.contains("2. Diagnose WSL -> Windows proxy -> HTTPS egress"));
+    assert!(stdout.contains("3. Rebind WSL listener"));
+    assert!(!stdout.contains("WSL channel:   HEALTHY"));
 }
