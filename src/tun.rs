@@ -416,7 +416,9 @@ pub fn render_native(
 ) -> Result<Value, &'static str> {
     validate(selected)?;
     config::validate(original)?;
-    let mut c = original.clone();
+    // A native Windows TUN mode change must preserve the independent WSL WG ingress.
+    let (base, wsl_layer) = crate::wsl_tun::split(original)?;
+    let mut c = base;
     if c["inbounds"].as_array().is_some_and(|a| a.len() == 3) {
         c["inbounds"].as_array_mut().unwrap().pop();
         c["outbounds"].as_array_mut().unwrap().pop();
@@ -432,8 +434,9 @@ pub fn render_native(
         c["route"].as_object_mut().unwrap().remove("rule_set");
     }
     if !selected.managed_tun {
-        config::validate(&c)?;
-        return Ok(c);
+        let merged = crate::wsl_tun::attach(&c, wsl_layer.as_ref())?;
+        config::validate(&merged)?;
+        return Ok(merged);
     }
     if control.is_empty() || control.len() > 8 {
         return Err("TUN_CONTROL_NOT_CONNECTED");
@@ -476,8 +479,9 @@ pub fn render_native(
     } else {
         rules.push(json!({"inbound":["windows-tun"],"outbound":"desktop-selector"}));
     }
-    config::validate(&c)?;
-    Ok(c)
+    let merged = crate::wsl_tun::attach(&c, wsl_layer.as_ref())?;
+    config::validate(&merged)?;
+    Ok(merged)
 }
 
 pub fn toggle_state(

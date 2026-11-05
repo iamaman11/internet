@@ -1,0 +1,213 @@
+//! Native WSL packet ingress in the single Windows sing-box configuration.
+//! This is a strict, reversible projection. The Local Secret Vault owns keys;
+//! this code never invents, prints or stores a second credential authority.
+use serde_json::{Value, json};
+use std::net::Ipv4Addr;
+
+pub const ENDPOINT_TAG: &str = "wsl-kernel";
+pub const TRANSPORT_TAG: &str = "wsl-transport-direct";
+pub const GUEST_WG_IP: &str = "10.222.28.2/32";
+pub const WINDOWS_WG_IP: &str = "10.222.28.1/30";
+pub const WG_LISTEN_PORT: u16 = 43912;
+
+#[derive(Clone)]
+pub struct Layer {
+    endpoint: Value,
+    outbound: Value,
+    rule: Value,
+}
+fn expected_rule() -> Value {
+    json!({"inbound":[ENDPOINT_TAG], "outbound":"wsl-selector"})
+}
+fn key_like(s: &str) -> bool {
+    s.len() == 44
+        && s.ends_with('=')
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+}
+fn valid_guest_ip(s: &str) -> bool {
+    s.parse::<Ipv4Addr>().is_ok_and(|ip| {
+        ip.is_private()
+            && !ip.is_loopback()
+            && !ip.is_link_local()
+            && !ip.is_unspecified()
+            && !ip.is_broadcast()
+    })
+}
+fn valid_wsl_interface(s: &str) -> bool {
+    s.starts_with("vEthernet (WSL")
+        && s.ends_with(')')
+        && s.len() <= 128
+        && s.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
+}
+fn check_layer(layer: &Layer) -> Result<(), &'static str> {
+    let endpoint = &layer.endpoint;
+    if endpoint["tag"] != ENDPOINT_TAG
+        || endpoint["type"] != "wireguard"
+        || endpoint["address"] != json!([WINDOWS_WG_IP])
+        || endpoint["detour"] != TRANSPORT_TAG
+        || endpoint["private_key"]
+            .as_str()
+            .is_none_or(|s| !key_like(s))
+        || endpoint.as_object().is_none_or(|o| o.len() != 6)
+    {
+        return Err("WSL_WG_ENDPOINT_UNOWNED");
+    }
+    let peers = endpoint["peers"].as_array().ok_or("WSL_WG_PEER_INVALID")?;
+    if peers.len() != 1 {
+        return Err("WSL_WG_PEER_INVALID");
+    }
+    let p = &peers[0];
+    if p.as_object().is_none_or(|o| o.len() != 5)
+        || p["public_key"].as_str().is_none_or(|s| !key_like(s))
+        || p["address"].as_str().is_none_or(|s| !valid_guest_ip(s))
+        || p["port"].as_u64() != Some(u64::from(WG_LISTEN_PORT))
+        || p["allowed_ips"] != json!([GUEST_WG_IP])
+        || p["persistent_keepalive_interval"] != 2
+    {
+        return Err("WSL_WG_PEER_INVALID");
+    }
+    if layer.outbound["tag"] != TRANSPORT_TAG
+        || layer.outbound["type"] != "direct"
+        || layer.outbound.as_object().is_none_or(|o| o.len() != 3)
+        || layer.outbound["bind_interface"]
+            .as_str()
+            .is_none_or(|s| !valid_wsl_interface(s))
+    {
+        return Err("WSL_TRANSPORT_INTERFACE_INVALID");
+    }
+    if layer.rule != expected_rule() {
+        return Err("WSL_WG_ROUTE_UNOWNED");
+    }
+    Ok(())
+}
+
+/// Strip only the three known U7 objects. All other native config is unchanged.
+/// This also prevents TUN mode transitions from accidentally deleting the layer.
+pub fn split(original: &Value) -> Result<(Value, Option<Layer>), &'static str> {
+    let Some(endpoints) = original.get("endpoints") else {
+        return Ok((original.clone(), None));
+    };
+    let endpoints = endpoints.as_array().ok_or("WSL_ENDPOINTS_INVALID")?;
+    if endpoints.len() != 1 {
+        return Err("WSL_ENDPOINTS_UNOWNED");
+    }
+    let outbound = original["outbounds"]
+        .as_array()
+        .and_then(|v| v.last())
+        .ok_or("WSL_TRANSPORT_MISSING")?
+        .clone();
+    let rule = original
+        .pointer("/route/rules")
+        .and_then(Value::as_array)
+        .and_then(|v| v.last())
+        .ok_or("WSL_WG_ROUTE_MISSING")?
+        .clone();
+    let layer = Layer {
+        endpoint: endpoints[0].clone(),
+        outbound,
+        rule,
+    };
+    check_layer(&layer)?;
+    let mut clean = original.clone();
+    clean
+        .as_object_mut()
+        .ok_or("CONFIG_JSON_INVALID")?
+        .remove("endpoints");
+    clean["outbounds"]
+        .as_array_mut()
+        .ok_or("CONFIG_OUTBOUNDS_MISSING")?
+        .pop();
+    clean
+        .pointer_mut("/route/rules")
+        .and_then(Value::as_array_mut)
+        .ok_or("CONFIG_ROUTE_RULES_MISSING")?
+        .pop();
+    Ok((clean, Some(layer)))
+}
+
+pub fn attach(base: &Value, layer: Option<&Layer>) -> Result<Value, &'static str> {
+    let Some(layer) = layer else {
+        return Ok(base.clone());
+    };
+    check_layer(layer)?;
+    if base.get("endpoints").is_some() {
+        return Err("WSL_WG_ALREADY_CONFIGURED");
+    }
+    let mut next = base.clone();
+    next["endpoints"] = json!([layer.endpoint]);
+    next["outbounds"]
+        .as_array_mut()
+        .ok_or("CONFIG_OUTBOUNDS_MISSING")?
+        .push(layer.outbound.clone());
+    next.pointer_mut("/route/rules")
+        .and_then(Value::as_array_mut)
+        .ok_or("CONFIG_ROUTE_RULES_MISSING")?
+        .push(layer.rule.clone());
+    Ok(next)
+}
+
+pub struct Options<'a> {
+    pub guest_ip: Ipv4Addr,
+    pub wsl_interface: &'a str,
+    pub windows_private_key: &'a str,
+    pub guest_public_key: &'a str,
+}
+
+pub fn render(original: &Value, opts: &Options<'_>) -> Result<Value, &'static str> {
+    crate::config::validate(original)?;
+    let (base, existing) = split(original)?;
+    if existing.is_some() {
+        return Err("WSL_WG_ALREADY_CONFIGURED");
+    }
+    if !valid_guest_ip(&opts.guest_ip.to_string())
+        || !valid_wsl_interface(opts.wsl_interface)
+        || !key_like(opts.windows_private_key)
+        || !key_like(opts.guest_public_key)
+    {
+        return Err("WSL_WG_OPTIONS_INVALID");
+    }
+    let layer = Layer {
+        endpoint: json!({
+            "type":"wireguard", "tag":ENDPOINT_TAG,
+            "address":[WINDOWS_WG_IP],
+            "private_key":opts.windows_private_key,
+            "detour":TRANSPORT_TAG,
+            "peers":[{
+                "address":opts.guest_ip.to_string(),
+                "port": WG_LISTEN_PORT,
+                "public_key":opts.guest_public_key,
+                "allowed_ips":[GUEST_WG_IP],
+                "persistent_keepalive_interval":2
+            }]
+        }),
+        outbound: json!({"type":"direct","tag":TRANSPORT_TAG,"bind_interface":opts.wsl_interface}),
+        rule: expected_rule(),
+    };
+    let next = attach(&base, Some(&layer))?;
+    crate::config::validate(&next)?;
+    Ok(next)
+}
+
+pub fn remove(original: &Value) -> Result<Value, &'static str> {
+    crate::config::validate(original)?;
+    let (base, _) = split(original)?;
+    crate::config::validate(&base)?;
+    Ok(base)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn no_secret_in_debug_or_errors() {
+        let bad = json!({"endpoints":[{"tag":"fake","private_key":"SECRET"}],
+            "outbounds":[{"tag":"fake"}], "route":{"rules":[{"inbound":["fake"]}]}});
+        let result = split(&bad);
+        assert!(result.is_err());
+        assert!(!result.err().unwrap().contains("SECRET"));
+        assert!(!valid_guest_ip("127.0.0.1"));
+        assert!(!valid_wsl_interface("Ethernet"));
+        assert!(!key_like("not-a-private-key"));
+    }
+}
