@@ -5,6 +5,10 @@ use std::time::Duration;
 
 #[cfg(any(windows, test))]
 const DIAGNOSTIC_READBACK_TIMEOUT: Duration = Duration::from_millis(2200);
+/// One deadline for both native WSL guest discovery and Windows NIC ownership.
+/// A cold Ubuntu startup may take longer than a warm per-process probe.
+#[cfg(windows)]
+const WSL_DIAGNOSE_DISCOVERY_BUDGET: Duration = Duration::from_millis(6500);
 #[cfg(any(windows, test))]
 const WSL_SYNC_READBACK_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -95,7 +99,12 @@ pub fn windows_start_config(
 }
 #[cfg(windows)]
 pub fn discover() -> Result<Option<Network>, &'static str> {
-    discover_with_deadline(None)
+    // A bounded diagnostic readback is independent of Windows start.
+    // Share the budget between the WSL guest and Windows ownership probe;
+    // two separate full timeouts would multiply the worst-case duration.
+    discover_with_deadline(Some(
+        std::time::Instant::now() + WSL_DIAGNOSE_DISCOVERY_BUDGET,
+    ))
 }
 
 /// Only an explicit WSL sync starts Ubuntu; Windows startup never calls it.
