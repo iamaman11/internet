@@ -560,9 +560,15 @@ fn menu_status() {
     println!();
     println!("============ INTERNET ============");
     println!("sing-box:      {running}");
-    println!("Windows mode:  {} ({count} saved apps)", windows_mode_label(saved.as_ref()));
+    println!(
+        "Windows mode:  {} ({count} saved apps)",
+        windows_mode_label(saved.as_ref())
+    );
     println!("Windows route: {}", route(Target::Desktop));
-    println!("TUN:           {}", tun_runtime_label(&task, saved.as_ref(), native.as_ref()));
+    println!(
+        "TUN:           {}",
+        tun_runtime_label(&task, saved.as_ref(), native.as_ref())
+    );
     println!("Windows egress: NOT TESTED (use Diagnose)");
     println!("WSL:           proxy-only / {}", route(Target::Wsl));
     println!("WSL channel:   NOT TESTED (WSL menu -> Diagnose)");
@@ -977,15 +983,25 @@ mod operator_menu_tests {
             "native_tun_configured":true,"native_tun_up":true});
         let bad = json!({"desired_native_match":false,
             "native_tun_configured":true,"native_tun_up":true});
-        assert_eq!(tun_runtime_label(&Ok(true), Some(&s), Some(&good)),
-            "UP (native; egress NOT TESTED)");
-        assert_eq!(tun_runtime_label(&Ok(true), Some(&s), Some(&bad)),
-            "DRIFT (run Diagnose)");
-        assert_eq!(tun_runtime_label(&Ok(false), Some(&s), Some(&good)),
-            "DRIFT (adapter UP while sing-box stopped)");
-        assert_eq!(tun_runtime_label(&Err("TASK_READBACK_FAILED"), Some(&s), Some(&good)),
-            "UNKNOWN (task unreadable)");
-        assert_eq!(tun_runtime_label(&Ok(true), Some(&s), None),
-            "UNKNOWN (run Status)");
+        assert_eq!(
+            tun_runtime_label(&Ok(true), Some(&s), Some(&good)),
+            "UP (native; egress NOT TESTED)"
+        );
+        assert_eq!(
+            tun_runtime_label(&Ok(true), Some(&s), Some(&bad)),
+            "DRIFT (run Diagnose)"
+        );
+        assert_eq!(
+            tun_runtime_label(&Ok(false), Some(&s), Some(&good)),
+            "DRIFT (adapter UP while sing-box stopped)"
+        );
+        assert_eq!(
+            tun_runtime_label(&Err("TASK_READBACK_FAILED"), Some(&s), Some(&good)),
+            "UNKNOWN (task unreadable)"
+        );
+        assert_eq!(
+            tun_runtime_label(&Ok(true), Some(&s), None),
+            "UNKNOWN (run Status)"
+        );
     }
 }
