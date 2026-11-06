@@ -241,6 +241,32 @@ mod native {
         }
         Ok(ip.to_owned())
     }
+    fn expected_vm_ipv4(config: &Value) -> Result<Ipv4Addr, &'static str> {
+        let server = config["outbounds"][0]["server"]
+            .as_str()
+            .ok_or("WSL_VM_TARGET_UNKNOWN")?;
+        let target: Ipv4Addr = server.parse().map_err(|_| "WSL_VM_TARGET_INVALID")?;
+        if target.is_private()
+            || target.is_loopback()
+            || target.is_link_local()
+            || target.is_unspecified()
+        {
+            return Err("WSL_VM_TARGET_INVALID");
+        }
+        Ok(target)
+    }
+    #[cfg(test)]
+    #[test]
+    fn vm_egress_expectation_uses_configured_endpoint_not_hardcoded_vm() {
+        for target in ["64.176.74.102", "203.0.113.9"] {
+            let c = json!({"outbounds":[{"server":target}]});
+            assert_eq!(expected_vm_ipv4(&c).unwrap().to_string(), target);
+        }
+        for invalid in ["127.0.0.1", "10.1.2.3", "not-an-ip"] {
+            let c = json!({"outbounds":[{"server":invalid}]});
+            assert!(expected_vm_ipv4(&c).is_err());
+        }
+    }
     fn active(s: &Value) -> bool {
         s["kernel_interface"] == true
             && s["route_active"] == true
@@ -312,9 +338,10 @@ mod native {
         let ip = check_egress()?;
         let route = state["route"].as_str().unwrap_or("UNKNOWN");
         let expect_vm = route.starts_with("direct-");
-        let pass = !expect_vm || ip == "64.176.74.102";
+        let target = expected_vm_ipv4(&config::read(&config::installed())?)?;
+        let pass = !expect_vm || ip == target.to_string();
         Ok(json!({"ok":pass,"state":"ON","ip4":ip,
-            "expected":if expect_vm {"64.176.74.102"}else{"WARP_EGRESS_UNSPECIFIED"},
+            "expected":if expect_vm {target.to_string()} else {"WARP_EGRESS_UNSPECIFIED".into()},
             "reason_code":if pass {"WSL_NATIVE_IPV4_EGRESS_CONFIRMED"} else {"WSL_NATIVE_IP_MISMATCH"},
             "other_protocols":"NOT_TESTED",
             "next_action":"Verify DNS UDP IPv6 and independent Windows paths"}))
@@ -442,7 +469,9 @@ mod native {
             guest("activate", Some(&guest_pub))?;
             let ip = check_egress()?;
             let chosen = config::selected(&candidate, Target::Wsl)?;
-            if chosen.tag().starts_with("direct-") && ip != "64.176.74.102" {
+            if chosen.tag().starts_with("direct-")
+                && ip != expected_vm_ipv4(&candidate)?.to_string()
+            {
                 return Err("WSL_TUN_EGRESS_NOT_VM");
             }
             let after = guest_state()?;

@@ -536,8 +536,14 @@ fn running_paths(name: &str) -> Result<Vec<String>, &'static str> {
     if validated.contains('\\') {
         return Err("APP_NAME_EXPECTED");
     }
+    // Get-Process reads the native Windows process table; avoid the slower
+    // Win32_Process CIM/WMI provider for every application operation. Only
+    // exact executable paths are accepted, never a guessed name or PID.
+    let leaf = validated
+        .strip_suffix(".exe")
+        .ok_or("APPLICATION_NAME_INVALID")?;
     let script = format!(
-        r#"[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $ErrorActionPreference='Stop'; @(Get-CimInstance Win32_Process -Filter "Name='{validated}'" | Where-Object {{ $_.ExecutablePath }} | Select-Object -ExpandProperty ExecutablePath -Unique) | ForEach-Object {{ [Console]::WriteLine($_) }}"#
+        r#"[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $ErrorActionPreference='Stop'; Get-Process -Name '{leaf}' -ErrorAction SilentlyContinue | Where-Object {{ $_.ProcessName -ieq '{leaf}' }} | ForEach-Object {{ try {{ if ($_.Path) {{ [Console]::WriteLine($_.Path) }} }} catch {{ }} }}"#
     );
     let result = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
