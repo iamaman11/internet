@@ -551,10 +551,8 @@ mod tests {
         validate(&all_native).unwrap();
         assert_eq!(all_native["endpoints"], with_wg["endpoints"]);
         assert_eq!(
-            &all_native["outbounds"].as_array().unwrap()[..with_wg["outbounds"]
-                .as_array()
-                .unwrap()
-                .len()],
+            &all_native["outbounds"].as_array().unwrap()
+                [..with_wg["outbounds"].as_array().unwrap().len()],
             with_wg["outbounds"].as_array().unwrap().as_slice()
         );
         assert_eq!(
