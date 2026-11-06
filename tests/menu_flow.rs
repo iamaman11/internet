@@ -90,7 +90,7 @@ fn menu_uses_one_column_and_explains_full_tun_scope() {
     );
     assert!(!normalized.contains("4. Choose DIRECT / WARP route"));
     assert!(normalized.contains("2. Choose running Windows application"));
-    assert!(normalized.contains("1. Start\n2. Stop"));
+    assert!(normalized.contains("1. Start managed sing-box (idempotent)\n2. Stop managed sing-box"));
     assert!(normalized.contains("1. Route via VM (save VM selection)"));
     assert!(normalized.contains("3. Enter exact EXE path"));
 }
