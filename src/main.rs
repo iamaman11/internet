@@ -286,6 +286,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         }
         ("wsl", ["wsl", "route", r]) => apply_route(Target::Wsl, r),
         ("wsl", ["wsl", "tun", "status"]) => wsl_tun_runtime::status(),
+        ("wsl", ["wsl", "tun", "dns", "setup"]) => wsl_tun_runtime::dns_setup(),
         ("wsl", ["wsl", "tun", "diagnose"]) => wsl_tun_runtime::diagnose(),
         ("wsl", ["wsl", "tun", "on"]) => wsl_tun_runtime::on(),
         ("wsl", ["wsl", "tun", "on", "--allow-mcp-reconnect"]) => {
@@ -360,7 +361,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         ("help", _) | ("--help", _) => Ok(
             json!({"version":env!("CARGO_PKG_VERSION"),"commands":["status [--deep]","tree","inspect <id>","diagnose [id]",
             "route <direct-auto|direct-hysteria2|direct-vless|warp-auto|warp-hysteria2|warp-vless>",
-            "wsl route <same>","wsl tun <on|off|status|diagnose>","wsl tun on --allow-mcp-reconnect (detached local CLI only)","wsl sync (offline attach)","start","stop","restart","configure --stdin",
+            "wsl route <same>","wsl tun <on|off|status|diagnose>","wsl tun dns setup (one-time native Ubuntu setup)","wsl tun on --allow-mcp-reconnect (detached local CLI only)","wsl sync (offline attach)","start","stop","restart","configure --stdin",
             "backup export <external-directory>","restore <external-directory>",
              "windows-mode <normal|selected|all|status>",
              "tun <status|on|off>","selected-apps <status|on|off|add EXE|remove EXE>",
@@ -415,6 +416,12 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
                         "Provision native Windows key C:\\internet\\config\\wsl-wireguard.key from trusted recovery; do not print its value"
                     } else if code == "WSL_GUEST_KEY_NOT_PROVISIONED" {
                         "Provision root:root 0600 /etc/wireguard/internet-wsl.key from trusted recovery"
+                    } else if code == "WSL_NATIVE_DNS_SETUP_REQUIRED" {
+                        "internet wsl tun dns setup; restart Ubuntu once; recheck status before ON"
+                    } else if code == "WSL_DNS_SETUP_OWNER_CONFLICT" {
+                        "Inspect native Ubuntu /etc/wsl.conf and /etc/resolv.conf; refuse to overwrite foreign DNS policy"
+                    } else if code == "WSL_DNS_SETUP_FAILED" {
+                        "Native DNS provisioning failed; inspect Ubuntu DNS and WSL configuration without switching Windows routes"
                     } else if code == "WSL_TUN_RESTART_CONTROL_NOT_VERIFIED" {
                         "Windows TUN/MCP unchanged; initial endpoint installation or stale WSL IP requires an independently verified control path"
                     } else if code == "WSL_TUN_PEER_STALE_REQUIRES_RECONFIGURE" {
