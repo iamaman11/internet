@@ -81,8 +81,9 @@ fn menu_uses_one_column_and_explains_full_tun_scope() {
     assert!(!first_menu.contains("Add application"));
     assert!(!first_menu.contains("Remove application"));
     assert!(first_menu.contains("Windows mode:"));
-    assert!(first_menu.contains("Windows egress: NOT TESTED"));
-    assert!(first_menu.contains("WSL:           native TUN status via WSL menu /"));
+    assert!(first_menu.contains("Windows egress: NOT TESTED (8 -> 1: real HTTPS)"));
+    assert!(first_menu.contains("WSL route:     "));
+    assert!(first_menu.contains("WSL egress:    NOT TESTED"));
     let normalized = stdout.replace("\r\n", "\n");
     assert!(
         normalized.contains("1. ALL captured Windows traffic -> VM (DIRECT; control IPs excluded)")
@@ -92,6 +93,42 @@ fn menu_uses_one_column_and_explains_full_tun_scope() {
     assert!(normalized.contains("1. Start\n2. Stop"));
     assert!(normalized.contains("1. Route via VM (save VM selection)"));
     assert!(normalized.contains("3. Enter exact EXE path"));
+}
+
+#[test]
+fn blank_enter_refreshes_main_and_returns_from_submenus_without_mutation() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_internet"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"\n8\n\n1\n\n0\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(text.matches("=== NETWORK DIAGNOSTICS ===").count(), 1);
+    assert!(text.contains("4. Full infrastructure (includes untested provider resources)"));
+    assert!(text.contains("2. Ubuntu native WireGuard: real HTTPS and VM IPv4"));
+    assert!(text.contains("3. Six external proxies: real HTTPS through DIRECT / WARP"));
+    assert!(!text.contains("Unknown choice."));
+    assert!(!text.contains("Operation exit="));
+    assert!(text.matches("1. Windows internet mode").count() >= 4);
+}
+
+#[test]
+fn invalid_diagnostic_choice_does_not_invoke_network_or_exit() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_internet"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"8\n9\n0\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("Unknown diagnostic option; no operation executed."));
+    assert!(!text.contains("Operation exit="));
+    assert!(text.matches("1. Windows internet mode").count() >= 2);
 }
 
 #[test]
@@ -126,12 +163,12 @@ fn wsl_menu_reports_native_tun_without_claiming_unverified_egress() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("=== WSL / UBUNTU ==="));
     assert!(stdout.contains("Network: WSL2 NAT | TUN: UNKNOWN | Route:"));
-    assert!(stdout.contains("Public IP: NOT TESTED (option 4)"));
+    assert!(stdout.contains("Public IP: NOT TESTED in this view (option 4 runs HTTPS)"));
     assert!(stdout.contains("1. WSL native TUN ON"));
     assert!(stdout.contains("2. WSL native TUN OFF"));
     assert!(stdout.contains("3. Choose WSL DIRECT / WARP route"));
-    assert!(stdout.contains("4. Test WSL internet via native WireGuard"));
-    assert!(stdout.contains("5. Diagnose native WSL TUN state"));
-    assert!(stdout.contains("6. Diagnose legacy explicit WSL proxy"));
+    assert!(stdout.contains("4. Test WSL IPv4 HTTPS egress via native WireGuard"));
+    assert!(stdout.contains("5. Show WSL TUN state (read-only, no HTTPS)"));
+    assert!(stdout.contains("6. Test legacy explicit WSL proxy (not native TUN)"));
     assert!(!stdout.contains("WSL channel:   HEALTHY"));
 }
