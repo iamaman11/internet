@@ -14,7 +14,8 @@ LOCAL_RULE = "163"
 TUNNEL_RULE = "164"
 ORIGINAL_RESOLV = "/mnt/wsl/resolv.conf"
 STUB_RESOLV = "/run/systemd/resolve/stub-resolv.conf"
-NATIVE_RESOLV = "nameserver 1.1.1.1\nnameserver 8.8.8.8\n"
+RESOLVED_CONF = "/etc/systemd/resolved.conf.d/internet-wsl.conf"
+RESOLVED_POLICY = "[Resolve]\\nDNS=1.1.1.1 8.8.8.8\\n"
 
 def run(*args, check=True):
     p = subprocess.run(args, capture_output=True, text=True, timeout=20)
@@ -56,21 +57,23 @@ def dns_target():
     p = pathlib.Path("/etc/resolv.conf")
     return os.readlink(p) if p.is_symlink() else "NOT_SYMLINK"
 
-def dns_ready():
-    """WSL must not replace the resolver on the next wsl.exe invocation."""
-    conf = pathlib.Path("/etc/wsl.conf")
-    resolv = pathlib.Path("/etc/resolv.conf")
-    if not conf.is_file() or resolv.is_symlink() or not resolv.is_file():
-        return False
+def dns_boot_configured():
+    """One WSL boot setting, one existing systemd-resolved service."""
+    import configparser
     try:
-        import configparser
         ini = configparser.ConfigParser()
-        ini.read_string(conf.read_text())
-        if not ini.has_section("network") or ini.getboolean("network", "generateResolvConf", fallback=True) is not False:
-            return False
-        return resolv.stat().st_uid == 0 and resolv.read_text() == NATIVE_RESOLV
+        ini.read_string(pathlib.Path("/etc/wsl.conf").read_text())
+        enabled = ini.has_section("network") and (
+            ini.getboolean("network", "generateResolvConf", fallback=True) is False)
+        return enabled and pathlib.Path(RESOLVED_CONF).read_text() == RESOLVED_POLICY
     except (OSError, UnicodeError, ValueError, configparser.Error):
         return False
+
+def dns_ready():
+    """The existing systemd resolver owns a stable link across WSL boots."""
+    resolv = pathlib.Path("/etc/resolv.conf")
+    return (dns_boot_configured() and resolv.is_symlink()
+            and os.path.realpath(resolv) == STUB_RESOLV)
 
 def dns_setup():
     if interface_exists() or owned_rules()[2]:
@@ -78,44 +81,51 @@ def dns_setup():
     if dns_ready():
         print(json.dumps({"ok": True, "changed": False, "reboot_required": False}))
         return
-    # Only provision the stock WSL-owned resolver. Foreign DNS policy is never replaced.
-    if dns_target() != ORIGINAL_RESOLV:
+    if dns_target() not in (ORIGINAL_RESOLV, "../run/systemd/resolve/stub-resolv.conf", STUB_RESOLV):
         raise RuntimeError("WSL_DNS_SETUP_OWNER_CONFLICT")
     conf = pathlib.Path("/etc/wsl.conf").read_text()
-    if len(conf) > 8192 or "[network]" in conf.lower() or "generateResolvConf" in conf:
+    current = pathlib.Path(RESOLVED_CONF)
+    if len(conf) > 8192 or (current.exists() and current.read_text() != RESOLVED_POLICY):
         raise RuntimeError("WSL_DNS_SETUP_OWNER_CONFLICT")
-    # Same one-shot native guest executor, no daemon, helper, or second state store.
+    if "[network]" in conf.lower() and not dns_boot_configured() and "generateResolvConf=false" not in conf:
+        raise RuntimeError("WSL_DNS_SETUP_OWNER_CONFLICT")
     root_code = """import os,pathlib,subprocess,tempfile
-p=pathlib.Path('/etc/wsl.conf')
-r=pathlib.Path('/etc/resolv.conf')
-original=p.read_bytes()
-assert b'[network]' not in original.lower() and os.readlink(r)=='/mnt/wsl/resolv.conf'
-mode=p.stat().st_mode & 0o777
-def replace(path,content,mode):
- fd,name=tempfile.mkstemp(dir='/etc',prefix='.internet-dns-tmp-')
+wc=pathlib.Path('/etc/wsl.conf')
+directory=pathlib.Path('/etc/systemd/resolved.conf.d')
+policy=directory/'internet-wsl.conf'
+original=wc.read_bytes()
+old_mode=wc.stat().st_mode & 0o777
+old_policy=policy.read_bytes() if policy.exists() else None
+new_policy=b'[Resolve]\\nDNS=1.1.1.1 8.8.8.8\\n'
+def put(path,data,mode):
+ path.parent.mkdir(parents=True,exist_ok=True)
+ fd,tmp=tempfile.mkstemp(dir=str(path.parent),prefix='.internet-native-')
  try:
   os.fchmod(fd,mode)
   with os.fdopen(fd,'wb') as f:
-   f.write(content);f.flush();os.fsync(f.fileno())
-  os.replace(name,path)
+   f.write(data);f.flush();os.fsync(f.fileno())
+  os.replace(tmp,path)
  finally:
-  if os.path.exists(name): os.unlink(name)
+  if os.path.exists(tmp):os.unlink(tmp)
 try:
- replace(p,original+b'\\n[network]\\ngenerateResolvConf=false\\n',mode)
- replace(r,b'nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n',0o644)
- result=subprocess.run(['/usr/bin/getent','ahostsv4','example.com'],capture_output=True,timeout=10)
- if result.returncode: raise RuntimeError('DNS_NATIVE_PROBE_FAILED')
+ if old_policy is not None and old_policy != new_policy:
+  raise RuntimeError('DNS_OWNER_CONFLICT')
+ if b'[network]' not in original.lower():
+  put(wc,original+b'\\n[network]\\ngenerateResolvConf=false\\n',old_mode)
+ if not policy.exists():put(policy,new_policy,0o644)
+ subprocess.run(['/usr/bin/systemctl','restart','systemd-resolved'],check=True,
+                stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
 except BaseException:
- replace(p,original,mode)
- if r.exists() or r.is_symlink():r.unlink()
- r.symlink_to('/mnt/wsl/resolv.conf')
+ if wc.read_bytes()!=original:put(wc,original,old_mode)
+ if old_policy is None and policy.exists():policy.unlink()
  raise
 """
     result = sudo("/usr/bin/python3", "-c", root_code, check=False)
-    if result.returncode or not dns_ready():
+    if result.returncode or not dns_boot_configured():
         raise RuntimeError("WSL_DNS_SETUP_FAILED")
-    print(json.dumps({"ok": True, "changed": True, "reboot_required": True,
-                      "next_action": "Restart only Ubuntu WSL; verify native DNS and NAT"}))
+    restart = not dns_ready()
+    print(json.dumps({"ok": True, "changed": True, "reboot_required": restart,
+                      "next_action": "Restart only Ubuntu if required, verify DNS and NAT"}))
 
 def route_state():
     own_main, own_table, any_rules = owned_rules()
