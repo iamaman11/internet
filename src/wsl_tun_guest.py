@@ -66,7 +66,7 @@ def dns_ready():
         import configparser
         ini = configparser.ConfigParser()
         ini.read_string(conf.read_text())
-        if not ini.has_section("network") or not ini.getboolean("network", "generateResolvConf", fallback=True) is False:
+        if not ini.has_section("network") or ini.getboolean("network", "generateResolvConf", fallback=True) is not False:
             return False
         return resolv.stat().st_uid == 0 and resolv.read_text() == NATIVE_RESOLV
     except (OSError, UnicodeError, ValueError, configparser.Error):
@@ -175,13 +175,13 @@ def activate(public):
         raise RuntimeError("WSL_NATIVE_DNS_SETUP_REQUIRED")
     if run("/usr/sbin/ip", "-6", "route", "show", "default").stdout.strip():
         raise RuntimeError("WSL_IPV6_DEFAULT_CONFLICT")
-     try:
+    try:
         sudo("/usr/sbin/ip", "-4", "route", "add", "default", "dev", IFACE, "table", TABLE)
         sudo("/usr/sbin/ip", "-4", "rule", "add", "priority", LOCAL_RULE, "lookup",
              "main", "suppress_prefixlength", "0")
         sudo("/usr/sbin/ip", "-4", "rule", "add", "priority", TUNNEL_RULE, "lookup", TABLE)
         sudo("/usr/sbin/ip", "-6", "route", "add", "unreachable", "default", "metric", "1")
-         state = route_state()
+        state = route_state()
         if not (state["route_active"] and state["dns_redirected"] and state["ipv6_guard"]):
             raise RuntimeError("WSL_WG_APPLY_READBACK_FAILED")
         print(json.dumps({"ok": True, "changed": True, "phase": "guest_full_route_active"}))
