@@ -245,7 +245,7 @@ def main():
     elif action == "status":
         state = route_state()
         state["ok"] = True
-        state["dns_target_kind"] = ("native_static" if dns_ready()
+        state["dns_target_kind"] = ("native_resolved" if dns_ready()
                                      else "wsl_generated" if dns_target() == ORIGINAL_RESOLV
                                      else "unknown")
         print(json.dumps(state))
