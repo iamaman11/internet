@@ -612,10 +612,7 @@ fn menu_status() {
         tun_runtime_label(&task, saved.as_ref(), native.as_ref())
     );
     println!("Windows egress: NOT TESTED (8 -> 1: real HTTPS)");
-    println!(
-        "WSL route:     {} (native TUN: 4 -> 5)",
-        route(Target::Wsl)
-    );
+    println!("WSL route:     {} (native TUN: 4 -> 5)", route(Target::Wsl));
     println!("WSL egress:    NOT TESTED (8 -> 2: native WG HTTPS)");
     println!("VM target:     {vm} (address, not provider-health proof)");
     if matches!(saved.as_ref(), Some(s) if s.managed_tun && !s.selected_apps) {
