@@ -270,7 +270,6 @@ pub fn wireguard_firewall_allow(_: &Network, _: &str) -> Result<(), &'static str
     Err("WINDOWS_ONLY")
 }
 
-
 /// The only accepted positive readback is an HTTP 407 challenge from inside WSL.
 /// A bare listening socket or unknown protocol reply is not a proof.
 pub fn classify_auth_reply(raw: &str) -> Result<(), &'static str> {
