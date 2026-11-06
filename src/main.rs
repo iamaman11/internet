@@ -733,7 +733,7 @@ fn menu_diagnose() -> Option<Vec<String>> {
     println!("0. Back (Enter = back)");
     match read_choice("Check: ")?.as_str() {
         "1" => Some(vec!["diagnose".into(), "windows/desktop-selector".into()]),
-        "2" => Some(vec!["wsl".into(), "tun".into(), "diagnose".into()]),
+        "2" => Some(vec!["diagnose".into(), "windows/wsl-tun".into()]),
         "3" => Some(vec!["proxies".into(), "test".into()]),
         "4" => Some(vec!["diagnose".into()]),
         "0" | "" => Some(vec![]),
