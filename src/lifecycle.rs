@@ -226,8 +226,42 @@ mod native {
         }
     }
     pub fn restart() -> Result<(), &'static str> {
+        let path = config::installed();
+        let original = config::read(&path)?;
+        // Do not interrupt working Windows networking for a config that cannot
+        // even pass the native sing-box parser. No WSL process is involved.
+        native_check(&path)?;
+        let was_running = is_running()?;
+        if !was_running {
+            return start();
+        }
         stop()?;
-        start()
+        if start().is_ok() {
+            return Ok(());
+        }
+        // A failed start may have fallen back to the owned WSL loopback
+        // listener. Never overwrite a concurrent or foreign modification.
+        let current = config::read(&path)
+            .map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
+        if current != original
+            && config::with_wsl_loopback(&original)
+                .as_ref()
+                .ok() != Some(&current)
+        {
+            return Err("TASK_RESTART_CONFIG_OWNER_CONFLICT");
+        }
+        // The same Rust CLI performs one bounded recovery attempt, using the
+        // already-owned task and original validated config; not a second agent.
+        stop().map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
+        if current != original {
+            checked_replace(&path, &current, &original)
+                .map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
+        }
+        if start().is_err() {
+            return Err("TASK_RESTART_RECOVERY_UNCONFIRMED");
+        }
+        // Runtime is healthy again, but the initial restart did fail.
+        Err("TASK_RESTART_RECOVERED")
     }
 }
 #[cfg(windows)]
