@@ -553,6 +553,14 @@ fn native_wsl_tun(deep: bool) -> Diagnostic {
                     d.health = Health::Healthy;
                     d.reason_code = "WSL_NATIVE_IPV4_EGRESS_CONFIRMED";
                     d.next_action = "Verify UDP/DNS/IPv6 separately; check WSL reboot recovery";
+                } else if v["reason_code"] == "WSL_TUN_NOT_ACTIVE" {
+                    d.reason_code = "WSL_TUN_NOT_ACTIVE";
+                    d.actual = Some("OFF".into());
+                    d.next_action = "internet wsl tun on (when desired)";
+                } else if v["reason_code"] == "WSL_NATIVE_IP_MISMATCH" {
+                    d.health = Health::Failed;
+                    d.reason_code = "WSL_NATIVE_IP_MISMATCH";
+                    d.next_action = "Check current VM egress and the WSL selector; do not switch Windows";
                 } else {
                     d.reason_code = "WSL_NATIVE_EGRESS_NOT_CONFIRMED";
                     d.next_action = "internet wsl tun diagnose";
@@ -576,8 +584,8 @@ fn native_wsl_tun(deep: bool) -> Diagnostic {
                 }
             }
         }
-        Err(_) => {
-            d.reason_code = "WSL_NATIVE_READBACK_UNAVAILABLE";
+        Err(code) => {
+            d.reason_code = code;
             d.next_action = "internet wsl tun status (check Ubuntu independently)";
         }
     }
