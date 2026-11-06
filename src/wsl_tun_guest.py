@@ -41,6 +41,23 @@ def owned_rules():
 def interface_exists():
     return pathlib.Path("/sys/class/net", IFACE).exists()
 
+def wsl_gateway():
+    """Read the current WSL NAT gateway, never guess a fixed host IP."""
+    import ipaddress
+    route = run("/usr/sbin/ip", "-4", "route", "show", "default").stdout.strip().split()
+    if route.count("via") != 1 or route.count("dev") != 1:
+        raise RuntimeError("WSL_NATIVE_GATEWAY_INVALID")
+    if route[route.index("dev") + 1] != "eth0":
+        raise RuntimeError("WSL_NATIVE_GATEWAY_INVALID")
+    gateway = route[route.index("via") + 1]
+    try:
+        ip = ipaddress.IPv4Address(gateway)
+        if not ip.is_private or ip.is_loopback or ip.is_link_local:
+            raise ValueError("unsafe")
+    except ValueError:
+        raise RuntimeError("WSL_NATIVE_GATEWAY_INVALID") from None
+    return gateway
+
 def assert_owned(public=None):
     if not interface_exists():
         raise RuntimeError("WSL_WG_INTERFACE_NOT_FOUND")
@@ -164,7 +181,8 @@ def prepare(public):
         sudo("/usr/sbin/ip", "link", "add", IFACE, "type", "wireguard")
         sudo("/usr/sbin/ip", "address", "add", IP, "dev", IFACE)
         sudo("/usr/bin/wg", "set", IFACE, "listen-port", PORT,
-             "private-key", KEY_FILE, "peer", public, "allowed-ips", "0.0.0.0/0")
+             "private-key", KEY_FILE, "peer", public, "allowed-ips", "0.0.0.0/0",
+             "endpoint", wsl_gateway() + ":43913", "persistent-keepalive", "2")
         sudo("/usr/sbin/ip", "link", "set", "dev", IFACE, "mtu", "1220", "up")
         assert_owned()
         print(json.dumps({"ok": True, "phase": "guest_prepared", "default_route_unchanged": True}))
@@ -251,6 +269,14 @@ def main():
         print(json.dumps(state))
     elif action == "prepare" and len(sys.argv) == 3:
         prepare(sys.argv[2])
+    elif action == "probe":
+        assert_owned()
+        # A private, scoped packet initiates the handshake before any default
+        # route is changed. Ping reply is optional; WG handshake is checked by Rust.
+        result = run("/usr/bin/ping", "-n", "-c", "1", "-W", "1",
+                     "-I", IFACE, "10.222.28.1", check=False)
+        print(json.dumps({"ok": True, "phase": "peer_probe_sent",
+                          "icmp_reply_observed": result.returncode == 0}))
     elif action == "activate" and len(sys.argv) == 3:
         activate(sys.argv[2])
     elif action == "off" and len(sys.argv) == 3:
