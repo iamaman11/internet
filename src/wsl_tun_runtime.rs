@@ -125,6 +125,10 @@ mod native {
         if !out.status.success() || value["ok"] != true {
             return Err(match value["reason_code"].as_str() {
                 Some("WSL_GUEST_KEY_NOT_PROVISIONED") => "WSL_GUEST_KEY_NOT_PROVISIONED",
+                Some("WSL_NATIVE_DNS_SETUP_REQUIRED") => "WSL_NATIVE_DNS_SETUP_REQUIRED",
+                Some("WSL_DNS_SETUP_OWNER_CONFLICT") => "WSL_DNS_SETUP_OWNER_CONFLICT",
+                Some("WSL_DNS_SETUP_TUN_OWNED") => "WSL_DNS_SETUP_TUN_OWNED",
+                Some("WSL_DNS_SETUP_FAILED") => "WSL_DNS_SETUP_FAILED",
                 Some("WSL_WG_ORPHAN_RULE") => "WSL_WG_ORPHAN_RULE",
                 Some("WSL_WG_ALREADY_PRESENT") => "WSL_WG_ALREADY_PRESENT",
                 Some("WSL_WG_INTERFACE_UNOWNED") => "WSL_WG_INTERFACE_UNOWNED",
@@ -255,6 +259,18 @@ mod native {
             }
         }
         Ok(())
+    }
+
+    /// One-time native Ubuntu DNS setup. No additional runtime service or secret store.
+    pub fn dns_setup() -> Result<Value, &'static str> {
+        let s = guest_state()?;
+        if s["kernel_interface"] != false
+            || s["owned_route_rules"] != false
+            || s["ipv6_guard"] != false
+        {
+            return Err("WSL_DNS_SETUP_TUN_OWNED");
+        }
+        guest("dns-setup", None)
     }
 
     pub fn status() -> Result<Value, &'static str> {
@@ -478,8 +494,12 @@ mod native {
 }
 
 #[cfg(windows)]
-pub use native::{diagnose, off, on, on_allow_mcp_reconnect, status};
+pub use native::{diagnose, dns_setup, off, on, on_allow_mcp_reconnect, status};
 
+#[cfg(not(windows))]
+pub fn dns_setup() -> Result<Value, &'static str> {
+    Err("WINDOWS_ONLY")
+}
 #[cfg(not(windows))]
 pub fn status() -> Result<Value, &'static str> {
     Err("WINDOWS_ONLY")
@@ -507,6 +527,7 @@ mod tests {
     #[test]
     fn no_linux_controller_activates_network() {
         assert_eq!(status(), Err("WINDOWS_ONLY"));
+        assert_eq!(dns_setup(), Err("WINDOWS_ONLY"));
         assert_eq!(on(), Err("WINDOWS_ONLY"));
         assert_eq!(off(), Err("WINDOWS_ONLY"));
     }
