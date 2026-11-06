@@ -305,6 +305,15 @@ mod native {
     /// ON is idempotent. With an installed Windows endpoint, only Ubuntu
     /// kernel routes and DNS change. Initial Windows attachment is guarded.
     pub fn on() -> Result<Value, &'static str> {
+        on_inner(false)
+    }
+    /// Explicit operator-approved reconnect of the existing MCP-over-TUN link.
+    /// This must run in a detached instance of the same Rust CLI so that
+    /// the operation and its rollback outlive a temporary MCP disconnect.
+    pub fn on_allow_mcp_reconnect() -> Result<Value, &'static str> {
+        on_inner(true)
+    }
+    fn on_inner(allow_mcp_reconnect: bool) -> Result<Value, &'static str> {
         let path = config::installed();
         let old = config::read(&path)?;
         let configured = wsl_tun::split(&old)?.1.is_some();
@@ -345,7 +354,9 @@ mod native {
             return Err("WSL_TUN_WINDOWS_NOT_RUNNING");
         }
         // Never silently restart a managed Windows TUN/control connection.
-        if needs_update && running && crate::tun::status()?["managed_tun"] == true {
+        if needs_update && running && crate::tun::status()?["managed_tun"] == true
+            && !allow_mcp_reconnect
+        {
             return Err("WSL_TUN_RESTART_CONTROL_NOT_VERIFIED");
         }
         let candidate = if needs_update {
@@ -465,7 +476,7 @@ mod native {
 }
 
 #[cfg(windows)]
-pub use native::{diagnose, off, on, status};
+pub use native::{diagnose, off, on, on_allow_mcp_reconnect, status};
 
 #[cfg(not(windows))]
 pub fn status() -> Result<Value, &'static str> {
@@ -481,6 +492,10 @@ pub fn on() -> Result<Value, &'static str> {
 }
 #[cfg(not(windows))]
 pub fn off() -> Result<Value, &'static str> {
+    Err("WINDOWS_ONLY")
+}
+#[cfg(not(windows))]
+pub fn on_allow_mcp_reconnect() -> Result<Value, &'static str> {
     Err("WINDOWS_ONLY")
 }
 
