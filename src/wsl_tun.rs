@@ -227,6 +227,56 @@ pub fn remove(original: &Value) -> Result<Value, &'static str> {
 mod tests {
     use super::*;
     #[test]
+    fn fixed_windows_port_and_legacy_layer_round_trip_without_second_owner() {
+        let key = format!("{}=", "A".repeat(43));
+        let iface = "vEthernet (WSL (Hyper-V firewall))";
+        let peer = json!({
+            "address":"172.26.23.199", "port":43912,
+            "public_key":key, "allowed_ips":[GUEST_WG_IP],
+            "persistent_keepalive_interval":2
+        });
+        let modern = Layer {
+            endpoint: json!({
+                "type":"wireguard", "tag":ENDPOINT_TAG,
+                "address":[WINDOWS_WG_IP], "private_key":key,
+                "listen_port":WINDOWS_WG_LISTEN_PORT, "bind_interface":iface,
+                "peers":[peer]
+            }),
+            outbound: None,
+            rule: expected_rule(),
+        };
+        assert!(check_layer(&modern).is_ok());
+        let base = json!({"outbounds":[{"type":"direct","tag":"main"}],
+            "route":{"rules":[]}});
+        let candidate = attach(&base, Some(&modern)).unwrap();
+        let (restored, layer) = split(&candidate).unwrap();
+        assert_eq!(restored, base);
+        assert!(layer.unwrap().outbound.is_none());
+        let mut unsafe_endpoint = modern.clone();
+        unsafe_endpoint.endpoint["bind_interface"] = json!("Ethernet");
+        assert_eq!(check_layer(&unsafe_endpoint), Err("WSL_WG_ENDPOINT_UNOWNED"));
+        unsafe_endpoint = modern.clone();
+        unsafe_endpoint.endpoint["listen_port"] = json!(443);
+        assert_eq!(check_layer(&unsafe_endpoint), Err("WSL_WG_ENDPOINT_UNOWNED"));
+
+        let legacy = Layer {
+            endpoint: json!({
+                "type":"wireguard", "tag":ENDPOINT_TAG,
+                "address":[WINDOWS_WG_IP], "private_key":key,
+                "detour":TRANSPORT_TAG, "peers":[peer]
+            }),
+            outbound: Some(json!({"type":"direct","tag":TRANSPORT_TAG,
+                "bind_interface":iface})),
+            rule: expected_rule(),
+        };
+        assert!(check_layer(&legacy).is_ok());
+        let legacy_config = attach(&base, Some(&legacy)).unwrap();
+        let (old_base, old_layer) = split(&legacy_config).unwrap();
+        assert_eq!(old_base, base);
+        assert!(old_layer.unwrap().outbound.is_some());
+    }
+
+    #[test]
     fn no_secret_in_debug_or_errors() {
         let bad = json!({"endpoints":[{"tag":"fake","private_key":"SECRET"}],
             "outbounds":[{"tag":"fake"}], "route":{"rules":[{"inbound":["fake"]}]}});
