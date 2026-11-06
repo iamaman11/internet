@@ -16,7 +16,22 @@ $written = @()
 $createdRoot = $false
 $success = $false
 $createdTask = $false
+$updatedTaskSettings = $false
+$previousTaskSettings = $null
+$previousTaskXml = $null
 $taskName = 'INTERNET-SingBox'
+# A single native Task Scheduler task owns both runtime and bounded recovery.
+# No application watchdog, controller, or additional scheduled task exists.
+function Test-NativeRecoveryTrigger {
+    param($Task)
+    $triggers = @($Task.Triggers | Where-Object { $null -ne $_ })
+    if ($triggers.Count -ne 1) { return $false }
+    $xml = [xml](Export-ScheduledTask -TaskName $taskName -TaskPath '\')
+    $trigger = $xml.Task.Triggers.TimeTrigger
+    return $null -ne $trigger -and
+        [string]$trigger.Repetition.Interval -ceq 'PT1M' -and
+        [string]$trigger.Repetition.Duration -ceq ''
+}
 function Test-InternetOwnedTask {
     $task = Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction SilentlyContinue
     if ($null -eq $task) { return $false }
@@ -25,7 +40,8 @@ function Test-InternetOwnedTask {
     $xml = [xml](Export-ScheduledTask -TaskName $taskName -TaskPath '\')
     $expected = Join-Path $root 'sing-box.exe'
     $arguments = 'run -c "C:\internet\config\sing-box.json"'
-    if ($actions.Count -ne 1 -or $triggers.Count -ne 0 -or
+    if ($actions.Count -ne 1 -or $triggers.Count -gt 1 -or
+        ($triggers.Count -eq 1 -and -not (Test-NativeRecoveryTrigger $task)) -or
         $actions[0].Execute -cne $expected -or
         $actions[0].Arguments -cne $arguments -or
         $actions[0].WorkingDirectory -cne $root -or
@@ -124,7 +140,16 @@ try {
         $changed += $name
     }
     $taskOwned = Test-InternetOwnedTask
-    if ($changed.Count -eq 0 -and (Test-Path -LiteralPath $marker) -and $taskOwned) {
+    $taskPolicyNeedsUpdate = $false
+    if ($taskOwned) {
+        $installedTask = Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop
+        $taskSettings = $installedTask.Settings
+        $taskPolicyNeedsUpdate = $taskSettings.RestartCount -ne 3 -or
+            [string]$taskSettings.RestartInterval -cne 'PT1M' -or
+            -not (Test-NativeRecoveryTrigger $installedTask)
+    }
+    if ($changed.Count -eq 0 -and (Test-Path -LiteralPath $marker) -and
+        $taskOwned -and -not $taskPolicyNeedsUpdate) {
         Write-Output 'INSTALL_NOOP=PASS'
         $success = $true
         return
@@ -161,16 +186,42 @@ try {
     }
     & (Join-Path $root 'internet.exe') help --json | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'INSTALLED_CLI_SELF_CHECK_FAILED' }
-    # The existing Windows Task Scheduler is the sole persistent lifecycle owner.
-    # Registration happens once at installation, never during a CLI start command.
-    # There are no triggers: installation cannot start or reroute network traffic.
-    if (-not $taskOwned) {
-        $action = New-ScheduledTaskAction -Execute (Join-Path $root 'sing-box.exe') -Argument 'run -c "C:\internet\config\sing-box.json"' -WorkingDirectory $root
-        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-        $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-        Register-ScheduledTask -TaskName $taskName -TaskPath '\' -Action $action -Principal $principal -Settings $settings -Description 'INTERNET owned sing-box (manual start)' -ErrorAction Stop | Out-Null
-        $createdTask = $true
-        if (-not (Test-InternetOwnedTask)) { throw 'TASK_INSTALL_READBACK_FAILED' }
+    # One native time trigger repeats every minute, indefinitely. Windows'
+    # RestartOnFailure alone did not recover a forced process exit. IgnoreNew
+    # prevents duplicates. Fresh install never launches a network process.
+    # The Rust CLI is the only place that enables (Start) or disables (Stop)
+    # this existing task, so explicit Stop cannot be undone by a trigger.
+    if (-not $taskOwned -or $taskPolicyNeedsUpdate) {
+        $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+        $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
+        if ($taskOwned) {
+            $previousTaskSettings = $taskSettings
+            $previousTaskXml = Export-ScheduledTask -TaskName $taskName -TaskPath '\'
+            # Legacy task without recurrence: Running means ON; Ready means OFF.
+            # Preserve the enabled state for an already upgraded task.
+            $settings.Enabled = if (Test-NativeRecoveryTrigger $installedTask) {
+                [bool]$taskSettings.Enabled
+            } else {
+                $installedTask.State -eq 'Running'
+            }
+            $updatedTaskSettings = $true
+            Set-ScheduledTask -TaskName $taskName -TaskPath '\' -Settings $settings -Trigger $trigger -ErrorAction Stop | Out-Null
+        } else {
+            $settings.Enabled = $false
+            $action = New-ScheduledTaskAction -Execute (Join-Path $root 'sing-box.exe') -Argument 'run -c "C:\internet\config\sing-box.json"' -WorkingDirectory $root
+            $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+            Register-ScheduledTask -TaskName $taskName -TaskPath '\' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'INTERNET owned sing-box (manual start)' -ErrorAction Stop | Out-Null
+            $createdTask = $true
+        }
+        $readback = Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop
+        if (-not (Test-InternetOwnedTask) -or
+            -not (Test-NativeRecoveryTrigger $readback) -or
+            [bool]$readback.Settings.Enabled -ne [bool]$settings.Enabled -or
+            $readback.Settings.RestartCount -ne 3 -or
+            [string]$readback.Settings.RestartInterval -cne 'PT1M') {
+            throw 'TASK_RECOVERY_READBACK_FAILED'
+        }
+        Write-Output 'INSTALL_TASK_RECOVERY=PASS'
     }
     Set-Content -LiteralPath $marker -Value $owner -NoNewline
     Write-Output 'INSTALL_FILES=PASS'
@@ -180,6 +231,11 @@ try {
 }
 finally {
     if (-not $success) {
+        if ($updatedTaskSettings -and $null -ne $previousTaskXml) {
+            # Roll back the complete previous native task, including the
+            # legacy absence of triggers; restoring settings alone is unsafe.
+            Register-ScheduledTask -TaskName $taskName -TaskPath '\' -Xml $previousTaskXml -Force -ErrorAction Stop | Out-Null
+        }
         if ($createdTask) {
             # Roll back only the task registered by this exact attempt.
             if (Test-InternetOwnedTask) {

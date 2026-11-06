@@ -156,6 +156,24 @@ mod native {
             Err("TASK_NOT_INSTALLED")
         }
     }
+    fn enable_task() -> Result<(), &'static str> {
+        ensure_task()?;
+        let out = command("schtasks.exe", &["/Change", "/TN", TASK, "/Enable"])?;
+        if !out.status.success() {
+            return Err("TASK_ENABLE_REJECTED");
+        }
+        Ok(())
+    }
+    fn disable_task() -> Result<(), &'static str> {
+        if task_receipt()?.is_none() {
+            return Ok(());
+        }
+        let out = command("schtasks.exe", &["/Change", "/TN", TASK, "/Disable"])?;
+        if !out.status.success() {
+            return Err("TASK_DISABLE_REJECTED");
+        }
+        Ok(())
+    }
     pub fn start() -> Result<(), &'static str> {
         let path = config::installed();
         let current = config::read(&path)?;
@@ -163,6 +181,10 @@ mod native {
             if crate::selector::runtime_selected(crate::model::Target::Desktop).is_ok()
                 && crate::selector::runtime_selected(crate::model::Target::Wsl).is_ok()
             {
+                // The existing native task owns both lifecycle and recovery.
+                // Re-enable after an interrupted explicit Stop; IgnoreNew
+                // prevents duplicate native sing-box instances.
+                enable_task()?;
                 return Ok(());
             }
             return Err("RUNNING_SING_BOX_UNHEALTHY");
@@ -175,7 +197,7 @@ mod native {
         let updated = crate::wsl::windows_start_config(&current)?;
         checked_replace(&path, &current, &updated)?;
         native_check(&path)?;
-        ensure_task()?;
+        enable_task()?;
         let o = command("schtasks.exe", &["/Run", "/TN", TASK])?;
         if !o.status.success() {
             return Err("TASK_START_REJECTED");
@@ -207,7 +229,11 @@ mod native {
         checked_replace(&path, &current, &updated)
     }
     pub fn stop() -> Result<(), &'static str> {
-        if !is_running()? {
+        let running = is_running()?;
+        // Disable scheduled recovery BEFORE ending the task. Otherwise the
+        // next native trigger would undo an explicit operator Stop.
+        disable_task()?;
+        if !running {
             return Ok(());
         }
         let o = command("schtasks.exe", &["/End", "/TN", TASK])?;
@@ -226,8 +252,39 @@ mod native {
         }
     }
     pub fn restart() -> Result<(), &'static str> {
+        let path = config::installed();
+        let original = config::read(&path)?;
+        // Do not interrupt working Windows networking for a config that cannot
+        // even pass the native sing-box parser. No WSL process is involved.
+        native_check(&path)?;
+        let was_running = is_running()?;
+        if !was_running {
+            return start();
+        }
         stop()?;
-        start()
+        if start().is_ok() {
+            return Ok(());
+        }
+        // A failed start may have fallen back to the owned WSL loopback
+        // listener. Never overwrite a concurrent or foreign modification.
+        let current = config::read(&path).map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
+        if current != original
+            && config::with_wsl_loopback(&original).as_ref().ok() != Some(&current)
+        {
+            return Err("TASK_RESTART_CONFIG_OWNER_CONFLICT");
+        }
+        // The same Rust CLI performs one bounded recovery attempt, using the
+        // already-owned task and original validated config; not a second agent.
+        stop().map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
+        if current != original {
+            checked_replace(&path, &current, &original)
+                .map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
+        }
+        if start().is_err() {
+            return Err("TASK_RESTART_RECOVERY_UNCONFIRMED");
+        }
+        // Runtime is healthy again, but the initial restart did fail.
+        Err("TASK_RESTART_RECOVERED")
     }
 }
 #[cfg(windows)]

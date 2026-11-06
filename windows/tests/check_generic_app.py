@@ -7,17 +7,28 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 EXE = Path(r"C:\internet\internet.exe")
 TUN = Path(r"C:\internet\config\tun.json")
 CONFIG = Path(r"C:\internet\config\sing-box.json")
 
 def run(*args):
-    p = subprocess.run([str(EXE), "app", *args, "--json"],
-                       capture_output=True, timeout=20)
-    try: data = json.loads(p.stdout)
+    # Expose exactly which disposable step stalls; no credentials are ever
+    # passed to this fixture. Keep the bounded CI safety deadline.
+    step = "app " + " ".join(args)
+    print(f"U3_STEP_START {step}", flush=True)
+    started = time.monotonic()
+    try:
+        p = subprocess.run([str(EXE), "app", *args, "--json"],
+                           capture_output=True, timeout=20)
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(f"U3_COMMAND_TIMEOUT {step}") from exc
+    try:
+        data = json.loads(p.stdout)
     except (ValueError, UnicodeDecodeError):
-        raise AssertionError("APP_CLI_REPLY_INVALID") from None
+        raise AssertionError(f"APP_CLI_REPLY_INVALID {step}") from None
+    print(f"U3_STEP_END {step} elapsed_ms={int((time.monotonic()-started)*1000)}", flush=True)
     return p.returncode, data
 
 def same(before):

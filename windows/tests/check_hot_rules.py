@@ -142,6 +142,32 @@ def main():
                 check(route_through_socks(proxy_port, target_port), "HOT_RELOAD_NOT_APPLIED")
                 check(proc.poll() is None, "SING_BOX_RESTARTED_UNEXPECTEDLY")
                 print("U3_NATIVE_HOT_RELOAD_SAME_PID=PASS",flush=True)
+                # Isolated contract of the production mode switch: exactly
+                # one live sing-box, ALL matches every TCP flow while a
+                # SELECTED rule for a nonexistent EXE does not match it.
+                write_atomic(rules, {"version":3,"rules":[
+                    {"network":["tcp","udp","icmp"]}]})
+                deadline = time.monotonic() + 9
+                while time.monotonic() < deadline and route_through_socks(proxy_port, target_port):
+                    check(proc.poll() is None, "SING_BOX_EXITED_ON_ALL")
+                    time.sleep(0.18)
+                check(not route_through_socks(proxy_port, target_port), "HOT_ALL_NOT_APPLIED")
+                write_atomic(rules, {"version":3,"rules":[
+                    {"process_name":["unmatched-ci-fixture.exe"]}]})
+                deadline = time.monotonic() + 9
+                while time.monotonic() < deadline and not route_through_socks(proxy_port, target_port):
+                    check(proc.poll() is None, "SING_BOX_EXITED_ON_SELECTED")
+                    time.sleep(0.18)
+                check(route_through_socks(proxy_port, target_port), "HOT_SELECTED_NOT_APPLIED")
+                write_atomic(rules, {"version":3,"rules":[
+                    {"network":["tcp","udp","icmp"]}]})
+                deadline = time.monotonic() + 9
+                while time.monotonic() < deadline and route_through_socks(proxy_port, target_port):
+                    check(proc.poll() is None, "SING_BOX_EXITED_ON_ALL_RETURN")
+                    time.sleep(0.18)
+                check(not route_through_socks(proxy_port, target_port), "HOT_ALL_RETURN_NOT_APPLIED")
+                check(proc.poll() is None, "SING_BOX_RESTARTED_ON_MODE_SWITCH")
+                print("WINDOWS_ALL_SELECTED_HOT_SWITCH_ISOLATED=PASS", flush=True)
             finally:
                 if proc.poll() is None:
                     proc.terminate()

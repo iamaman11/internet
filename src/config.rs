@@ -29,6 +29,9 @@ fn by_tag<'a>(items: &'a [Value], tag: &str) -> Result<&'a Value, &'static str> 
     Ok(first)
 }
 pub fn validate(c: &Value) -> Result<(), &'static str> {
+    // Validate native Windows shape after removing only a strictly owned WSL WG layer.
+    let (base, _) = crate::wsl_tun::split(c)?;
+    let c = &base;
     let inbounds = array(c, "inbounds")?;
     let outbounds = array(c, "outbounds")?;
     let rules = c
@@ -470,10 +473,10 @@ mod tests {
             render_native(&initial, &active, &[invalid_control]),
             Err("TUN_CONTROL_IP_UNSAFE")
         );
-        assert_eq!(all_native["route"]["rules"].as_array().unwrap().len(), 3);
+        assert_eq!(all_native["route"]["rules"].as_array().unwrap().len(), 4);
         assert_eq!(
-            all_native["route"]["rules"][2]["outbound"],
-            "desktop-selector"
+            all_native["route"]["rules"][2]["rule_set"],
+            serde_json::json!(["internet-selected-apps"])
         );
 
         assert_eq!(
@@ -481,6 +484,9 @@ mod tests {
             "TUN_CONTROL_NOT_CONNECTED"
         );
         let tun = render_native(&initial, &active, &[control]).unwrap();
+        // ALL and SELECTED share the same native graph; only the watched
+        // source rule-set contents change. No sing-box restart is required.
+        assert_eq!(all_native, tun);
         assert_eq!(tun["inbounds"].as_array().unwrap().len(), 3);
         assert_eq!(tun["route"]["rules"].as_array().unwrap().len(), 4);
         assert_eq!(
@@ -507,6 +513,77 @@ mod tests {
         bad["outbounds"][8]["type"] = "selector".into();
         assert_eq!(validate(&bad), Err("TUN_ROUTE_UNSAFE"));
     }
+    #[test]
+    fn native_wsl_wireguard_layer_is_owned_reversible_and_windows_independent() {
+        use crate::wsl_tun::{self, Options};
+        let base = fixture();
+        let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let options = Options {
+            guest_ip: "172.26.23.199".parse().unwrap(),
+            wsl_interface: "vEthernet (WSL (Hyper-V firewall))",
+            windows_private_key: key,
+            guest_public_key: key,
+        };
+        let with_wg = wsl_tun::render(&base, &options).unwrap();
+        assert!(validate(&with_wg).is_ok());
+        assert_eq!(wsl_tun::remove(&with_wg).unwrap(), base);
+        assert_eq!(
+            wsl_tun::render(&with_wg, &options).unwrap_err(),
+            "WSL_WG_ALREADY_CONFIGURED"
+        );
+        assert_eq!(
+            selected(&with_wg, Target::Desktop).unwrap(),
+            Route::DirectAuto
+        );
+        assert_eq!(selected(&with_wg, Target::Wsl).unwrap(), Route::DirectAuto);
+        let updated = with_selected(&with_wg, Target::Wsl, Route::WarpAuto).unwrap();
+        assert_eq!(
+            selected(&updated, Target::Desktop).unwrap(),
+            Route::DirectAuto
+        );
+        assert_eq!(selected(&updated, Target::Wsl).unwrap(), Route::WarpAuto);
+        let original_rules = with_wg["route"]["rules"].as_array().unwrap().len();
+        let controls: std::net::Ipv4Addr = "64.176.74.102".parse().unwrap();
+        let all = crate::tun::toggle_state(
+            &crate::tun::Settings::default(),
+            crate::tun::Switch::ManagedTun,
+            true,
+        )
+        .unwrap();
+        let all_native = crate::tun::render_native(&with_wg, &all, &[controls]).unwrap();
+        validate(&all_native).unwrap();
+        assert_eq!(all_native["endpoints"], with_wg["endpoints"]);
+        assert_eq!(
+            &all_native["outbounds"].as_array().unwrap()
+                [..with_wg["outbounds"].as_array().unwrap().len()],
+            with_wg["outbounds"].as_array().unwrap().as_slice()
+        );
+        assert_eq!(
+            all_native["route"]["rules"].as_array().unwrap().len(),
+            original_rules + 2
+        );
+        assert_eq!(all_native["route"]["auto_detect_interface"], true);
+        let restored =
+            crate::tun::render_native(&all_native, &crate::tun::Settings::default(), &[]).unwrap();
+        assert_eq!(restored, with_wg);
+        let mut malformed = with_wg.clone();
+        malformed["endpoints"][0]["listen_port"] = serde_json::json!(43912);
+        assert_eq!(validate(&malformed), Err("WSL_WG_ENDPOINT_UNOWNED"));
+        malformed = with_wg.clone();
+        malformed["endpoints"][0]["peers"][0]["address"] = serde_json::json!("127.0.0.1");
+        assert_eq!(validate(&malformed), Err("WSL_WG_PEER_INVALID"));
+        malformed = with_wg.clone();
+        malformed["endpoints"][0]["bind_interface"] = serde_json::json!("Ethernet");
+        assert_eq!(validate(&malformed), Err("WSL_WG_ENDPOINT_UNOWNED"));
+        malformed = with_wg.clone();
+        malformed["route"]["rules"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap()["outbound"] = serde_json::json!("desktop-selector");
+        assert_eq!(validate(&malformed), Err("WSL_WG_ROUTE_UNOWNED"));
+    }
+
     #[test]
     fn no_unchecked_fallback_endpoints() {
         let mut c = fixture();
