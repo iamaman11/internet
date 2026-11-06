@@ -2,20 +2,21 @@
 use crate::{
     config, egress, lifecycle,
     model::{Diagnostic, Health, Target},
-    selector, tun,
+    selector, tun, wsl_tun_runtime,
 };
 use chrono::Utc;
 use std::{
     net::{SocketAddr, TcpStream},
     time::{Duration, Instant},
 };
-pub const IDS: [&str; 12] = [
+pub const IDS: [&str; 13] = [
     "internet",
     "windows",
     "windows/network",
     "windows/sing-box",
     "windows/desktop-selector",
     "windows/wsl-selector",
+    "windows/wsl-tun",
     "windows/tun",
     "windows/selected-apps",
     "vultr",
@@ -506,6 +507,7 @@ fn inspect_with_task(
         "windows/sing-box" => local_binary(task),
         "windows/desktop-selector" => local_selector(id, Target::Desktop, deep, task),
         "windows/wsl-selector" => local_selector(id, Target::Wsl, deep, task),
+        "windows/wsl-tun" => native_wsl_tun(deep),
         "windows/tun" | "windows/selected-apps" => match switch_snapshot {
             Some(observed) => tun::inspect_with_snapshot(id, observed, task),
             None => tun::inspect(id),
@@ -518,6 +520,68 @@ fn inspect_with_task(
             "Use internet tree for known resource IDs",
         ),
     }
+}
+/// A native read-only projection of the existing Rust Ubuntu kernel WG operations.
+/// Never treat the legacy authenticated proxy as proof of a full WSL TUN.
+fn native_wsl_tun(deep: bool) -> Diagnostic {
+    let mut d = node(
+        "windows/wsl-tun",
+        "native-packet-tunnel",
+        "Rust INTERNET / Ubuntu kernel WireGuard",
+        Some("windows"),
+        "internet wsl tun status",
+    );
+    d.dependencies = vec!["windows/sing-box", "windows/wsl-selector"];
+    if !cfg!(windows) {
+        d.next_action = "Inspect on Windows with WSL Ubuntu installed";
+        return d;
+    }
+    let state = if deep {
+        wsl_tun_runtime::diagnose()
+    } else {
+        wsl_tun_runtime::status()
+    };
+    d.source = "rust-wsl-tun-runtime / native-ubuntu-wg";
+    match state {
+        Ok(v) => {
+            d.observed_at = now();
+            if deep {
+                d.scope = "wsl_native_ipv4_https_egress";
+                d.actual = v["ip4"].as_str().map(str::to_owned);
+                d.expected = v["expected"].as_str().map(str::to_owned);
+                if v["ok"] == true {
+                    d.health = Health::Healthy;
+                    d.reason_code = "WSL_NATIVE_IPV4_EGRESS_CONFIRMED";
+                    d.next_action = "Verify UDP/DNS/IPv6 separately; check WSL reboot recovery";
+                } else {
+                    d.reason_code = "WSL_NATIVE_EGRESS_NOT_CONFIRMED";
+                    d.next_action = "internet wsl tun diagnose";
+                }
+            } else {
+                d.scope = "wsl_kernel_wireguard_handshake_and_route_readback";
+                d.actual = v["state"].as_str().map(str::to_owned);
+                if v["state"] == "ON"
+                    && v["handshake_observed"] == true
+                    && v["guest_peer_matches_native"] == true
+                {
+                    d.health = Health::Healthy;
+                    d.reason_code = "WSL_KERNEL_WG_CONFIRMED_EGRESS_NOT_TESTED";
+                    d.next_action = "internet diagnose windows/wsl-tun";
+                } else if v["state"] == "OFF" {
+                    d.reason_code = "WSL_NATIVE_TUN_OFF";
+                    d.next_action = "internet wsl tun on (when desired)";
+                } else {
+                    d.reason_code = "WSL_NATIVE_TUN_STATE_UNKNOWN";
+                    d.next_action = "internet wsl tun status";
+                }
+            }
+        }
+        Err(_) => {
+            d.reason_code = "WSL_NATIVE_READBACK_UNAVAILABLE";
+            d.next_action = "internet wsl tun status (check Ubuntu independently)";
+        }
+    }
+    d
 }
 /// Public port reachability is only a transport observation. It never proves VM
 /// identity, TLS, authentication, UDP, Docker health or actual egress.
