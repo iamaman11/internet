@@ -611,26 +611,27 @@ fn menu_status() {
         "TUN:           {}",
         tun_runtime_label(&task, saved.as_ref(), native.as_ref())
     );
-    println!("Windows egress: NOT TESTED (use Diagnose)");
+    println!("Windows egress: NOT TESTED (8 -> 1: real HTTPS)");
     println!(
-        "WSL:           native TUN status via WSL menu / {}",
+        "WSL route:     {} (native TUN: 4 -> 5)",
         route(Target::Wsl)
     );
-    println!("WSL channel:   NOT TESTED (WSL menu -> Diagnose)");
-    println!("VM target:     {vm} (egress NOT TESTED)");
+    println!("WSL egress:    NOT TESTED (8 -> 2: native WG HTTPS)");
+    println!("VM target:     {vm} (address, not provider-health proof)");
     if matches!(saved.as_ref(), Some(s) if s.managed_tun && !s.selected_apps) {
         println!("ALL mode: individual DIRECT app exclusions unavailable");
     }
 }
 fn menu_route(target: Target) -> Option<Vec<String>> {
     println!();
-    println!("Choose route (0 = back):");
+    println!("Choose route (0 or Enter = back):");
+    println!("DIRECT = VM; WARP = separate egress; Auto = fallback within the selected line.");
     for (i, route) in ROUTES.iter().enumerate() {
         println!("  {}. {}", i + 1, route);
     }
     let value = read_choice("Route number: ")?;
     let index = match value.as_str() {
-        "0" => return Some(vec![]),
+        "0" | "" => return Some(vec![]),
         n => match n.parse::<usize>().ok().filter(|n| (1..=6).contains(n)) {
             Some(i) => i,
             None => {
@@ -662,18 +663,18 @@ fn menu_wsl() -> Option<Vec<String>> {
         .map(|r| r.tag().to_owned())
         .unwrap_or_else(|| "UNKNOWN".to_owned());
     println!("Network: WSL2 NAT | TUN: {tun} | Route: {wsl_route}");
-    println!("Public IP: NOT TESTED (option 4) | VM target: 64.176.74.102");
+    println!("Public IP: NOT TESTED in this view (option 4 runs HTTPS)");
     if let Err(code) = state {
         println!("WSL readback: {code}");
     }
-    println!("1. WSL native TUN ON");
+    println!("1. WSL native TUN ON (initial attach may require a controlled sing-box restart)");
     println!("2. WSL native TUN OFF");
     println!("3. Choose WSL DIRECT / WARP route");
-    println!("4. Test WSL internet via native WireGuard");
-    println!("5. Diagnose native WSL TUN state");
-    println!("6. Diagnose legacy explicit WSL proxy");
-    println!("7. Rebind WSL proxy listener (requires stopped sing-box)");
-    println!("0. Back");
+    println!("4. Test WSL IPv4 HTTPS egress via native WireGuard");
+    println!("5. Show WSL TUN state (read-only, no HTTPS)");
+    println!("6. Test legacy explicit WSL proxy (not native TUN)");
+    println!("7. Rebind legacy WSL proxy listener (requires stopped sing-box)");
+    println!("0. Back (Enter = back)");
     match read_choice("WSL action: ")?.as_str() {
         "1" => Some(vec!["wsl".into(), "tun".into(), "on".into()]),
         "2" => Some(vec!["wsl".into(), "tun".into(), "off".into()]),
@@ -682,7 +683,7 @@ fn menu_wsl() -> Option<Vec<String>> {
         "5" => Some(vec!["wsl".into(), "tun".into(), "status".into()]),
         "6" => Some(vec!["diagnose".into(), "windows/wsl-selector".into()]),
         "7" => Some(vec!["wsl".into(), "sync".into()]),
-        "0" => Some(vec![]),
+        "0" | "" => Some(vec![]),
         _ => Some(vec!["invalid".into()]),
     }
 }
@@ -701,12 +702,12 @@ fn menu_windows() -> Option<Vec<String>> {
     println!("1. ALL captured Windows traffic -> VM (DIRECT; control IPs excluded)");
     println!("2. SELECTED applications ({count}) -> current Windows route");
     println!("3. NORMAL Windows network (TUN OFF; explicit proxies remain)");
-    println!("0. Back  (change route in main menu item 3)");
+    println!("0. Back (Enter = back; route in main menu item 3)");
     match read_choice("Mode: ")?.as_str() {
         "1" => Some(vec!["windows-mode".into(), "all".into()]),
         "2" => Some(vec!["windows-mode".into(), "selected".into()]),
         "3" => Some(vec!["windows-mode".into(), "normal".into()]),
-        "0" => Some(vec![]),
+        "0" | "" => Some(vec![]),
         _ => Some(vec!["invalid".into()]),
     }
 }
@@ -716,13 +717,33 @@ fn menu_proxies() -> Option<Vec<String>> {
     println!("1. Addresses and ports");
     println!("2. Credentials (local terminal only)");
     println!("3. Test six proxies (real HTTPS egress)");
-    println!("0. Back");
+    println!("0. Back (Enter = back)");
     match read_choice("Proxy action: ")?.as_str() {
         "1" => Some(vec!["proxies".into(), "list".into()]),
         "2" => Some(vec!["proxies".into(), "credentials".into()]),
         "3" => Some(vec!["proxies".into(), "test".into()]),
-        "0" => Some(vec![]),
+        "0" | "" => Some(vec![]),
         _ => Some(vec!["invalid".into()]),
+    }
+}
+fn menu_diagnose() -> Option<Vec<String>> {
+    println!();
+    println!("=== NETWORK DIAGNOSTICS ===");
+    println!("1. Windows route: real HTTPS (desktop selector, not each application)");
+    println!("2. Ubuntu native WireGuard: real HTTPS and VM IPv4");
+    println!("3. Six external proxies: real HTTPS through DIRECT / WARP");
+    println!("4. Full infrastructure (includes untested provider resources)");
+    println!("0. Back (Enter = back)");
+    match read_choice("Check: ")?.as_str() {
+        "1" => Some(vec!["diagnose".into(), "windows/desktop-selector".into()]),
+        "2" => Some(vec!["wsl".into(), "tun".into(), "diagnose".into()]),
+        "3" => Some(vec!["proxies".into(), "test".into()]),
+        "4" => Some(vec!["diagnose".into()]),
+        "0" | "" => Some(vec![]),
+        _ => {
+            println!("Unknown diagnostic option; no operation executed.");
+            Some(vec![])
+        }
     }
 }
 fn menu_app_action(exe: &str) -> Option<Vec<String>> {
@@ -731,12 +752,12 @@ fn menu_app_action(exe: &str) -> Option<Vec<String>> {
     println!("1. Route via VM (save VM selection)");
     println!("2. Normal route (remove VM selection; unavailable in ALL mode)");
     println!("3. Inspect application route");
-    println!("0. Back");
+    println!("0. Back (Enter = back)");
     match read_choice("Application action: ")?.as_str() {
         "1" => Some(vec!["app".into(), exe.into(), "vm".into()]),
         "2" => Some(vec!["app".into(), exe.into(), "direct".into()]),
         "3" => Some(vec!["app".into(), "diagnose".into(), exe.into()]),
-        "0" => Some(vec![]),
+        "0" | "" => Some(vec![]),
         _ => Some(vec!["invalid".into()]),
     }
 }
@@ -749,7 +770,7 @@ fn menu_select_app(paths: &[String]) -> Option<Vec<String>> {
         println!("{}. {}", index + 1, path);
     }
     let choice = read_choice("Application number (0 = back): ")?;
-    if choice == "0" {
+    if choice == "0" || choice.is_empty() {
         return Some(vec![]);
     }
     let Some(index) = choice
@@ -783,7 +804,7 @@ fn menu_apps() -> Option<Vec<String>> {
     println!("1. Choose saved application");
     println!("2. Choose running Windows application");
     println!("3. Enter exact EXE path");
-    println!("0. Back");
+    println!("0. Back (Enter = back)");
     match read_choice("Application source: ")?.as_str() {
         "1" => menu_select_app(&saved),
         "2" => {
@@ -807,13 +828,13 @@ fn menu_apps() -> Option<Vec<String>> {
         }
         "3" => {
             let path = read_choice("Exact executable path (.exe; 0 = back): ")?;
-            if path == "0" {
+            if path == "0" || path.is_empty() {
                 Some(vec![])
             } else {
                 menu_app_action(&path)
             }
         }
-        "0" => Some(vec![]),
+        "0" | "" => Some(vec![]),
         _ => Some(vec!["invalid".into()]),
     }
 }
@@ -828,11 +849,15 @@ fn menu() -> i32 {
         println!("  5. Start / Stop / Restart");
         println!("  6. Proxy settings and tests");
         println!("  7. Status (local native readback)");
-        println!("  8. Diagnose (real HTTPS egress)");
-        println!("  0. Exit");
+        println!("  8. Diagnose (choose Windows / WSL / proxies / full infrastructure)");
+        println!("  0. Exit (Enter = refresh)");
         let Some(choice) = read_choice("Choice: ") else {
             return 0;
         };
+        if choice.is_empty() {
+            // Enter refreshes the main screen; it never acts as an invalid command.
+            continue;
+        }
         let args = match choice.as_str() {
             "0" => return 0,
             "1" => menu_windows(),
@@ -843,18 +868,18 @@ fn menu() -> i32 {
                 println!("1. Start");
                 println!("2. Stop");
                 println!("3. Restart");
-                println!("0. Back");
+                println!("0. Back (Enter = back)");
                 read_choice("Action: ").map(|v| match v.as_str() {
                     "1" => vec!["start".into()],
                     "2" => vec!["stop".into()],
                     "3" => vec!["restart".into()],
-                    "0" => vec![],
+                    "0" | "" => vec![],
                     _ => vec!["invalid".into()],
                 })
             }
             "6" => menu_proxies(),
             "7" => Some(vec!["status".into()]),
-            "8" => Some(vec!["diagnose".into()]),
+            "8" => menu_diagnose(),
             _ => {
                 println!("Unknown choice.");
                 continue;
