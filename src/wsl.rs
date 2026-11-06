@@ -208,6 +208,69 @@ pub fn firewall_allow(_: &Network) -> Result<(), &'static str> {
     Err("WINDOWS_ONLY")
 }
 
+#[cfg(windows)]
+pub fn wireguard_firewall_allow(network: &Network, interface: &str) -> Result<(), &'static str> {
+    use std::process::Command;
+    // This is an endpoint-specific Windows Defender rule, not a controller.
+    // One exact guest /32 and one native WSL host adapter; never open the VM,
+    // Ethernet or global UDP scope. The existing Rust CLI is its only writer.
+    if !interface.starts_with("vEthernet (WSL")
+        || !interface.ends_with(')')
+        || interface.len() > 128
+        || !interface.bytes().all(|c| c.is_ascii_graphic() || c == b' ')
+    {
+        return Err("WSL_WG_INTERFACE_INVALID");
+    }
+    let script = format!(
+        r#"
+$ErrorActionPreference='Stop'
+$name='INTERNET-WSL-WG-43913'
+$remote='{guest}'
+$local='{gateway}'
+$iface='{interface}'
+$exe='C:\internet\sing-box.exe'
+$r=Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue
+if($r){{
+  $p=$r | Get-NetFirewallPortFilter
+  $app=$r | Get-NetFirewallApplicationFilter
+  $f=$r | Get-NetFirewallInterfaceFilter
+  if($r.DisplayName -cne $name -or $r.Direction -ne 'Inbound' -or
+     $r.Action -ne 'Allow' -or $r.Enabled -ne 'True' -or
+     [string]$p.Protocol -ne 'UDP' -or [string]$p.LocalPort -ne '43913' -or
+     [string]$p.RemotePort -ne 'Any' -or $app.Program -cne $exe -or
+     [string]$f.InterfaceAlias -cne $iface){{
+     throw 'WSL_WG_FIREWALL_OWNER_CONFLICT'
+  }}
+  $a=$r | Get-NetFirewallAddressFilter
+  $a | Set-NetFirewallAddressFilter -LocalAddress $local -RemoteAddress $remote | Out-Null
+}}else{{
+  New-NetFirewallRule -Name $name -DisplayName $name -Direction Inbound -Action Allow -Enabled True -Program $exe -Protocol UDP -LocalPort 43913 -LocalAddress $local -RemoteAddress $remote -InterfaceAlias $iface -Profile Any | Out-Null
+}}
+$r=Get-NetFirewallRule -Name $name -ErrorAction Stop
+$a=$r | Get-NetFirewallAddressFilter
+$p=$r | Get-NetFirewallPortFilter
+if([string]$a.RemoteAddress -cne $remote -or [string]$a.LocalAddress -cne $local -or
+   [string]$p.LocalPort -cne '43913'){{ throw 'WSL_WG_FIREWALL_READBACK_FAILED' }}
+"#,
+        guest = network.guest,
+        gateway = network.gateway,
+        interface = interface,
+    );
+    let out = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .map_err(|_| "WSL_WG_FIREWALL_EXEC_UNAVAILABLE")?;
+    if !out.status.success() {
+        return Err("WSL_WG_FIREWALL_APPLY_UNCONFIRMED");
+    }
+    Ok(())
+}
+#[cfg(not(windows))]
+pub fn wireguard_firewall_allow(_: &Network, _: &str) -> Result<(), &'static str> {
+    Err("WINDOWS_ONLY")
+}
+
+
 /// The only accepted positive readback is an HTTP 407 challenge from inside WSL.
 /// A bare listening socket or unknown protocol reply is not a proof.
 pub fn classify_auth_reply(raw: &str) -> Result<(), &'static str> {
