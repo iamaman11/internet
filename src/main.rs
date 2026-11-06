@@ -290,7 +290,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         ("wsl", ["wsl", "tun", "on"]) => wsl_tun_runtime::on(),
         ("wsl", ["wsl", "tun", "on", "--allow-mcp-reconnect"]) => {
             wsl_tun_runtime::on_allow_mcp_reconnect()
-        },
+        }
         ("wsl", ["wsl", "tun", "off"]) => wsl_tun_runtime::off(),
         ("tun", ["tun", "status"]) | ("selected-apps", ["selected-apps", "status"]) => {
             tun::status()
