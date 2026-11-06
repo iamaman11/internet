@@ -9,11 +9,12 @@ pub const TRANSPORT_TAG: &str = "wsl-transport-direct";
 pub const GUEST_WG_IP: &str = "10.222.28.2/32";
 pub const WINDOWS_WG_IP: &str = "10.222.28.1/30";
 pub const WG_LISTEN_PORT: u16 = 43912;
+pub const WINDOWS_WG_LISTEN_PORT: u16 = 43913;
 
 #[derive(Clone)]
 pub struct Layer {
     endpoint: Value,
-    outbound: Value,
+    outbound: Option<Value>,
     rule: Value,
 }
 fn expected_rule() -> Value {
@@ -45,11 +46,21 @@ fn check_layer(layer: &Layer) -> Result<(), &'static str> {
     if endpoint["tag"] != ENDPOINT_TAG
         || endpoint["type"] != "wireguard"
         || endpoint["address"] != json!([WINDOWS_WG_IP])
-        || endpoint["detour"] != TRANSPORT_TAG
         || endpoint["private_key"]
             .as_str()
             .is_none_or(|s| !key_like(s))
-        || endpoint.as_object().is_none_or(|o| o.len() != 6)
+        || (if endpoint.get("listen_port").is_some() {
+            endpoint["listen_port"].as_u64() != Some(u64::from(WINDOWS_WG_LISTEN_PORT))
+                || endpoint["bind_interface"]
+                    .as_str()
+                    .is_none_or(|s| !valid_wsl_interface(s))
+                || endpoint.as_object().is_none_or(|o| o.len() != 7)
+                || layer.outbound.is_some()
+        } else {
+            endpoint["detour"] != TRANSPORT_TAG
+                || endpoint.as_object().is_none_or(|o| o.len() != 6)
+                || layer.outbound.is_none()
+        })
     {
         return Err("WSL_WG_ENDPOINT_UNOWNED");
     }
@@ -67,14 +78,16 @@ fn check_layer(layer: &Layer) -> Result<(), &'static str> {
     {
         return Err("WSL_WG_PEER_INVALID");
     }
-    if layer.outbound["tag"] != TRANSPORT_TAG
-        || layer.outbound["type"] != "direct"
-        || layer.outbound.as_object().is_none_or(|o| o.len() != 3)
-        || layer.outbound["bind_interface"]
-            .as_str()
-            .is_none_or(|s| !valid_wsl_interface(s))
-    {
-        return Err("WSL_TRANSPORT_INTERFACE_INVALID");
+    if let Some(outbound) = &layer.outbound {
+        if outbound["tag"] != TRANSPORT_TAG
+            || outbound["type"] != "direct"
+            || outbound.as_object().is_none_or(|o| o.len() != 3)
+            || outbound["bind_interface"]
+                .as_str()
+                .is_none_or(|s| !valid_wsl_interface(s))
+        {
+            return Err("WSL_TRANSPORT_INTERFACE_INVALID");
+        }
     }
     if layer.rule != expected_rule() {
         return Err("WSL_WG_ROUTE_UNOWNED");
@@ -92,11 +105,20 @@ pub fn split(original: &Value) -> Result<(Value, Option<Layer>), &'static str> {
     if endpoints.len() != 1 {
         return Err("WSL_ENDPOINTS_UNOWNED");
     }
-    let outbound = original["outbounds"]
-        .as_array()
-        .and_then(|v| v.last())
-        .ok_or("WSL_TRANSPORT_MISSING")?
-        .clone();
+    // Version 1 used a separate detour outbound; version 2 uses the
+    // endpoint's native bind_interface and listen_port. Preserve both
+    // shapes for checked migration without accepting foreign layers.
+    let outbound = if endpoints[0].get("listen_port").is_some() {
+        None
+    } else {
+        Some(
+            original["outbounds"]
+                .as_array()
+                .and_then(|v| v.last())
+                .ok_or("WSL_TRANSPORT_MISSING")?
+                .clone(),
+        )
+    };
     let rule = original
         .pointer("/route/rules")
         .and_then(Value::as_array)
@@ -114,10 +136,12 @@ pub fn split(original: &Value) -> Result<(Value, Option<Layer>), &'static str> {
         .as_object_mut()
         .ok_or("CONFIG_JSON_INVALID")?
         .remove("endpoints");
-    clean["outbounds"]
-        .as_array_mut()
-        .ok_or("CONFIG_OUTBOUNDS_MISSING")?
-        .pop();
+    if layer.outbound.is_some() {
+        clean["outbounds"]
+            .as_array_mut()
+            .ok_or("CONFIG_OUTBOUNDS_MISSING")?
+            .pop();
+    }
     clean
         .pointer_mut("/route/rules")
         .and_then(Value::as_array_mut)
@@ -136,10 +160,12 @@ pub fn attach(base: &Value, layer: Option<&Layer>) -> Result<Value, &'static str
     }
     let mut next = base.clone();
     next["endpoints"] = json!([layer.endpoint]);
-    next["outbounds"]
-        .as_array_mut()
-        .ok_or("CONFIG_OUTBOUNDS_MISSING")?
-        .push(layer.outbound.clone());
+    if let Some(outbound) = &layer.outbound {
+        next["outbounds"]
+            .as_array_mut()
+            .ok_or("CONFIG_OUTBOUNDS_MISSING")?
+            .push(outbound.clone());
+    }
     next.pointer_mut("/route/rules")
         .and_then(Value::as_array_mut)
         .ok_or("CONFIG_ROUTE_RULES_MISSING")?
@@ -172,7 +198,8 @@ pub fn render(original: &Value, opts: &Options<'_>) -> Result<Value, &'static st
             "type":"wireguard", "tag":ENDPOINT_TAG,
             "address":[WINDOWS_WG_IP],
             "private_key":opts.windows_private_key,
-            "detour":TRANSPORT_TAG,
+            "listen_port":WINDOWS_WG_LISTEN_PORT,
+            "bind_interface":opts.wsl_interface,
             "peers":[{
                 "address":opts.guest_ip.to_string(),
                 "port": WG_LISTEN_PORT,
@@ -181,7 +208,7 @@ pub fn render(original: &Value, opts: &Options<'_>) -> Result<Value, &'static st
                 "persistent_keepalive_interval":2
             }]
         }),
-        outbound: json!({"type":"direct","tag":TRANSPORT_TAG,"bind_interface":opts.wsl_interface}),
+        outbound: None,
         rule: expected_rule(),
     };
     let next = attach(&base, Some(&layer))?;
