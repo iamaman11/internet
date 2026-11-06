@@ -543,7 +543,7 @@ fn running_paths(name: &str) -> Result<Vec<String>, &'static str> {
         .strip_suffix(".exe")
         .ok_or("APPLICATION_NAME_INVALID")?;
     let script = format!(
-        r#"[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $ErrorActionPreference='Stop'; Get-Process -Name '{leaf}' -ErrorAction SilentlyContinue | Where-Object {{ $_.ProcessName -ieq '{leaf}' }} | ForEach-Object {{ try {{ if ($_.Path) {{ [Console]::WriteLine($_.Path) }} }} catch {{ }} }}"#
+        r#"[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $ErrorActionPreference='Stop'; Get-Process -Name '{leaf}' -ErrorAction SilentlyContinue | Where-Object {{ $_.ProcessName -ieq '{leaf}' }} | ForEach-Object {{ try {{ if ($_.Path) {{ [Console]::WriteLine($_.Path) }} }} catch {{ }} }}; exit 0"#
     );
     let result = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
