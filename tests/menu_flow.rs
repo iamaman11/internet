@@ -102,7 +102,12 @@ fn blank_enter_refreshes_main_and_returns_from_submenus_without_mutation() {
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(b"\n8\n\n1\n\n0\n").unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"\n8\n\n1\n\n0\n")
+        .unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
