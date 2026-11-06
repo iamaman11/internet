@@ -694,6 +694,7 @@ fn menu_windows() -> Option<Vec<String>> {
     let count = state.as_ref().map(|s| s.applications.len()).unwrap_or(0);
     println!();
     println!("=== WINDOWS INTERNET MODE ===");
+    println!("Changing capture mode may restart sing-box and interrupt MCP over TUN.");
     println!("Current (saved): {}", windows_mode_label(state.as_ref()));
     println!("Windows route: {current}; selected apps: {count}");
     println!("1. ALL captured Windows traffic -> VM (DIRECT; control IPs excluded)");
@@ -713,7 +714,7 @@ fn menu_proxies() -> Option<Vec<String>> {
     println!("=== PROXY SETTINGS AND TESTS ===");
     println!("1. Addresses and ports");
     println!("2. Credentials (local terminal only)");
-    println!("3. Test six proxies (real HTTPS egress)");
+    println!("3. Test six proxies (real HTTPS; WSL Vault credentials remain private)");
     println!("0. Back (Enter = back)");
     match read_choice("Proxy action: ")?.as_str() {
         "1" => Some(vec!["proxies".into(), "list".into()]),
@@ -862,9 +863,9 @@ fn menu() -> i32 {
             "3" => menu_route(Target::Desktop),
             "4" => menu_wsl(),
             "5" => {
-                println!("1. Start");
-                println!("2. Stop");
-                println!("3. Restart");
+                println!("1. Start managed sing-box (idempotent)");
+                println!("2. Stop managed sing-box (can interrupt TUN and MCP)");
+                println!("3. Restart managed sing-box (can interrupt TUN and MCP)");
                 println!("0. Back (Enter = back)");
                 read_choice("Action: ").map(|v| match v.as_str() {
                     "1" => vec!["start".into()],
