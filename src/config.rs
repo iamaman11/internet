@@ -473,10 +473,10 @@ mod tests {
             render_native(&initial, &active, &[invalid_control]),
             Err("TUN_CONTROL_IP_UNSAFE")
         );
-        assert_eq!(all_native["route"]["rules"].as_array().unwrap().len(), 3);
+        assert_eq!(all_native["route"]["rules"].as_array().unwrap().len(), 4);
         assert_eq!(
-            all_native["route"]["rules"][2]["outbound"],
-            "desktop-selector"
+            all_native["route"]["rules"][2]["rule_set"],
+            serde_json::json!(["internet-selected-apps"])
         );
 
         assert_eq!(
@@ -484,6 +484,9 @@ mod tests {
             "TUN_CONTROL_NOT_CONNECTED"
         );
         let tun = render_native(&initial, &active, &[control]).unwrap();
+        // ALL and SELECTED share the same native graph; only the watched
+        // source rule-set contents change. No sing-box restart is required.
+        assert_eq!(all_native, tun);
         assert_eq!(tun["inbounds"].as_array().unwrap().len(), 3);
         assert_eq!(tun["route"]["rules"].as_array().unwrap().len(), 4);
         assert_eq!(
@@ -557,7 +560,7 @@ mod tests {
         );
         assert_eq!(
             all_native["route"]["rules"].as_array().unwrap().len(),
-            original_rules + 1
+            original_rules + 2
         );
         assert_eq!(all_native["route"]["auto_detect_interface"], true);
         let restored =

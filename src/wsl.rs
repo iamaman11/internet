@@ -208,17 +208,125 @@ pub fn firewall_allow(_: &Network) -> Result<(), &'static str> {
     Err("WINDOWS_ONLY")
 }
 
+// Scoped rollback data is intentionally transient in the same Rust invocation.
+// Only addresses are captured; no firewall export or second state store.
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireGuardFirewallBefore(pub Option<(Ipv4Addr, Ipv4Addr)>);
+
+#[cfg(windows)]
+fn valid_wg_interface(interface: &str) -> bool {
+    interface.starts_with("vEthernet (WSL")
+        && interface.ends_with(')')
+        && interface.len() <= 128
+        && interface
+            .bytes()
+            .all(|c| (c.is_ascii_graphic() || c == b' ') && c != b'\'')
+}
+
+#[cfg(windows)]
+pub fn wireguard_firewall_snapshot(
+    _network: &Network,
+    interface: &str,
+) -> Result<WireGuardFirewallBefore, &'static str> {
+    use std::process::Command;
+    if !valid_wg_interface(interface) {
+        return Err("WSL_WG_INTERFACE_INVALID");
+    }
+    let script = format!(
+        r#"
+$ErrorActionPreference='Stop'
+$name='INTERNET-WSL-WG-43913'
+$r=Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue
+if (!$r) {{ 'ABSENT'; exit 0 }}
+$p=$r | Get-NetFirewallPortFilter
+$app=$r | Get-NetFirewallApplicationFilter
+$f=$r | Get-NetFirewallInterfaceFilter
+if ($r.DisplayName -cne $name -or $r.Direction -ne 'Inbound' -or
+    $r.Action -ne 'Allow' -or $r.Enabled -ne 'True' -or
+    [string]$p.Protocol -ne 'UDP' -or [string]$p.LocalPort -ne '43913' -or
+    [string]$p.RemotePort -ne 'Any' -or
+    $app.Program -cne 'C:\internet\sing-box.exe' -or
+    [string]$f.InterfaceAlias -cne '{interface}') {{ throw 'OWNER_CONFLICT' }}
+$a=$r | Get-NetFirewallAddressFilter
+'{{0}} {{1}}' -f [string]$a.LocalAddress,[string]$a.RemoteAddress
+"#,
+        interface = interface
+    );
+    let out = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .map_err(|_| "WSL_WG_FIREWALL_SNAPSHOT_FAILED")?;
+    if !out.status.success() {
+        return Err("WSL_WG_FIREWALL_OWNER_CONFLICT");
+    }
+    let text = std::str::from_utf8(&out.stdout).map_err(|_| "WSL_WG_FIREWALL_SNAPSHOT_FAILED")?;
+    let parts: Vec<_> = text.split_whitespace().collect();
+    if parts == ["ABSENT"] {
+        return Ok(WireGuardFirewallBefore(None));
+    }
+    if parts.len() != 2 {
+        return Err("WSL_WG_FIREWALL_SNAPSHOT_FAILED");
+    }
+    let local = parts[0]
+        .parse::<Ipv4Addr>()
+        .map_err(|_| "WSL_WG_FIREWALL_SNAPSHOT_FAILED")?;
+    let remote = parts[1]
+        .parse::<Ipv4Addr>()
+        .map_err(|_| "WSL_WG_FIREWALL_SNAPSHOT_FAILED")?;
+    if !local.is_private() || !remote.is_private() {
+        return Err("WSL_WG_FIREWALL_SNAPSHOT_FAILED");
+    }
+    Ok(WireGuardFirewallBefore(Some((local, remote))))
+}
+
+#[cfg(windows)]
+pub fn wireguard_firewall_restore(
+    network: &Network,
+    interface: &str,
+    before: &WireGuardFirewallBefore,
+) -> Result<(), &'static str> {
+    use std::process::Command;
+    // Never overwrite a rule changed by another actor since this invocation.
+    let current = wireguard_firewall_snapshot(network, interface)?;
+    let intended = WireGuardFirewallBefore(Some((network.gateway, network.guest)));
+    if current == *before {
+        return Ok(());
+    }
+    if current != intended {
+        return Err("WSL_WG_FIREWALL_CONCURRENT_CHANGE");
+    }
+    let action = match before.0 {
+        None => "Remove-NetFirewallRule -Name $name -ErrorAction Stop".to_string(),
+        Some((local, remote)) => format!(
+            "$r | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter -LocalAddress '{local}' -RemoteAddress '{remote}' -ErrorAction Stop | Out-Null"
+        ),
+    };
+    let script = format!(
+        r#"
+$ErrorActionPreference='Stop'
+$name='INTERNET-WSL-WG-43913'
+$r=Get-NetFirewallRule -Name $name -ErrorAction Stop
+{action}
+"#
+    );
+    let out = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .map_err(|_| "WSL_WG_FIREWALL_ROLLBACK_FAILED")?;
+    if !out.status.success() || wireguard_firewall_snapshot(network, interface)? != *before {
+        return Err("WSL_WG_FIREWALL_ROLLBACK_UNCONFIRMED");
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 pub fn wireguard_firewall_allow(network: &Network, interface: &str) -> Result<(), &'static str> {
     use std::process::Command;
     // This is an endpoint-specific Windows Defender rule, not a controller.
     // One exact guest /32 and one native WSL host adapter; never open the VM,
     // Ethernet or global UDP scope. The existing Rust CLI is its only writer.
-    if !interface.starts_with("vEthernet (WSL")
-        || !interface.ends_with(')')
-        || interface.len() > 128
-        || !interface.bytes().all(|c| c.is_ascii_graphic() || c == b' ')
-    {
+    if !valid_wg_interface(interface) {
         return Err("WSL_WG_INTERFACE_INVALID");
     }
     let script = format!(

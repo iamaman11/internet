@@ -47,6 +47,30 @@ fn emit(v: &Value, json_mode: bool) {
             v["observed"].as_str().unwrap_or("UNKNOWN"),
             v["owner"].as_str().unwrap_or("INTERNET")
         );
+    } else if v["ok"] == true && v["changed"].is_boolean() {
+        println!(
+            "OK: {}",
+            if v["changed"] == true {
+                "CHANGED"
+            } else {
+                "UNCHANGED"
+            }
+        );
+        if let Some(mode) = v["mode"].as_str() {
+            println!("Windows mode: {mode}");
+        }
+        if let Some(route) = v["selected"].as_str() {
+            println!("Route: {route}");
+        }
+        if v["singbox_restarted"] == false {
+            println!("sing-box: not restarted (native file watcher)");
+        }
+        if let Some(proof) = v["egress"].as_str() {
+            println!("External IP: {proof}");
+        }
+        if let Some(next) = v["next_action"].as_str() {
+            println!("Next: {next}");
+        }
     } else {
         println!("{}", v);
     }
@@ -408,6 +432,12 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
                         "Windows works without WSL; repair Ubuntu before internet wsl sync"
                     } else if code == "WSL_LISTENER_NATIVE_CHECK_FAILED" {
                         "Check Windows interface ownership; internet diagnose windows/wsl-selector"
+                    } else if code == "TUN_CONTROL_ROUTE_NOT_DIRECT" {
+                        "MCP uses the managed TUN; unsafe restart refused. ALL/SELECTED use native hot rules; NORMAL requires an independently safe control path"
+                    } else if code == "TUN_HOT_ROLLBACK_UNCONFIRMED" {
+                        "Inspect installed sing-box, native rule-set, saved mode and selector before another route change"
+                    } else if code == "TUN_HOT_CHANGE_ROLLED_BACK" {
+                        "Previous Windows mode restored; inspect native rule-set and retry only after diagnosis"
                     } else if code == "TUN_NATIVE_STATE_MISMATCH" {
                         "internet diagnose windows/tun"
                     } else if code == "WSL_WINDOWS_KEY_NOT_PROVISIONED"
@@ -694,7 +724,8 @@ fn menu_windows() -> Option<Vec<String>> {
     let count = state.as_ref().map(|s| s.applications.len()).unwrap_or(0);
     println!();
     println!("=== WINDOWS INTERNET MODE ===");
-    println!("Changing capture mode may restart sing-box and interrupt MCP over TUN.");
+    println!("Active TUN: ALL / SELECTED uses native rule reload; no sing-box restart.");
+    println!("NORMAL needs a safe control path before stopping the existing TUN.");
     println!("Current (saved): {}", windows_mode_label(state.as_ref()));
     println!("Windows route: {current}; selected apps: {count}");
     println!("1. ALL captured Windows traffic -> VM (DIRECT; control IPs excluded)");
@@ -747,8 +778,8 @@ fn menu_diagnose() -> Option<Vec<String>> {
 fn menu_app_action(exe: &str) -> Option<Vec<String>> {
     println!();
     println!("Application: {exe}");
-    println!("1. Route via VM (save VM selection)");
-    println!("2. Normal route (remove VM selection; unavailable in ALL mode)");
+    println!("1. Use current Windows selector (DIRECT via VM / WARP)");
+    println!("2. Normal route (remove selection; unavailable in ALL mode)");
     println!("3. Inspect application route");
     println!("0. Back (Enter = back)");
     match read_choice("Application action: ")?.as_str() {
@@ -781,11 +812,22 @@ fn menu_select_app(paths: &[String]) -> Option<Vec<String>> {
     };
     menu_app_action(&paths[index - 1])
 }
+fn saved_app_path_status(item: &str) -> &'static str {
+    if !item.contains('\\') {
+        return "NAME_ONLY";
+    }
+    match fs::metadata(item) {
+        Ok(meta) if meta.is_file() => "EXISTS",
+        Ok(_) => "NOT_A_FILE",
+        Err(e) if e.kind() == io::ErrorKind::NotFound => "NOT_FOUND",
+        Err(_) => "ACCESS_UNKNOWN",
+    }
+}
 fn menu_apps() -> Option<Vec<String>> {
     println!();
     println!("=== MANAGED APPLICATIONS ===");
     println!("Saved entries are retained in every Windows mode.");
-    println!("Only SELECTED mode applies per-app VM/direct routes.");
+    println!("Only SELECTED mode applies per-app current-selector/direct routes.");
     let saved = match tun::read_at(&tun::path()) {
         Ok(value) => value.applications,
         Err(code) => {
@@ -794,7 +836,7 @@ fn menu_apps() -> Option<Vec<String>> {
         }
     };
     for item in &saved {
-        println!("  VM selection: {item}");
+        println!("  Saved: {item} [{}]", saved_app_path_status(item));
     }
     if saved.is_empty() {
         println!("  No saved applications.");

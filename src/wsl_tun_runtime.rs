@@ -404,14 +404,15 @@ mod native {
         } else {
             old.clone()
         };
-        // The existing Rust CLI owns the only native WG UDP firewall rule.
-        // It is scoped to the current Ubuntu guest and the WSL vEthernet.
-        // Never restart Windows or change Ubuntu routes if this readback fails.
-        wsl::wireguard_firewall_allow(&network, &interface)?;
-        // Guest prepare preserves the NAT default route until handshake.
-        guest("prepare", Some(&windows_pub))?;
+        // Snapshot only the exact Rust-owned firewall rule, in memory.
+        // A failed guest prepare must never leave a new Windows allowance.
+        let firewall_before = wsl::wireguard_firewall_snapshot(&network, &interface)?;
         let mut modified_windows = false;
         let result = (|| -> Result<Value, &'static str> {
+            // Prepare retains the native NAT default until handshake.
+            // Both prepare and firewall application belong to this rollback.
+            guest("prepare", Some(&windows_pub))?;
+            wsl::wireguard_firewall_allow(&network, &interface)?;
             if needs_update {
                 if running {
                     lifecycle::stop()?;
@@ -457,6 +458,8 @@ mod native {
             Ok(v) => Ok(v),
             Err(code) => {
                 let guest_clean = guest("off", Some(&guest_pub)).is_ok();
+                let firewall_restored =
+                    wsl::wireguard_firewall_restore(&network, &interface, &firewall_before).is_ok();
                 let windows_restored = if modified_windows {
                     lifecycle::stop().is_ok()
                         && config::write_checked(&path, &old).is_ok()
@@ -467,7 +470,7 @@ mod native {
                 } else {
                     true
                 };
-                if !guest_clean || !windows_restored {
+                if !guest_clean || !windows_restored || !firewall_restored {
                     return Err("WSL_TUN_ROLLBACK_UNCONFIRMED");
                 }
                 Err(code)

@@ -38,6 +38,12 @@ fn native_path_pattern(path: &str) -> String {
     result
 }
 fn rules_source(state: &Settings) -> Value {
+    // A shared native local rule-set represents both ALL and SELECTED while
+    // Windows TUN stays up. Switching the rule-set does not restart sing-box
+    // or interrupt the MCP-over-TUN control connection.
+    if state.managed_tun && !state.selected_apps {
+        return json!({"version":3,"rules":[{"network":["tcp","udp","icmp"]}]});
+    }
     let mut names = Vec::new();
     let mut paths = Vec::new();
     for app in &state.applications {
@@ -470,15 +476,13 @@ pub fn render_native(
         .unwrap()
         .as_array_mut()
         .unwrap();
-    if selected.selected_apps {
-        rules.push(json!({"inbound":["windows-tun"],
-            "rule_set":[HOT_TAG],"outbound":"desktop-selector"}));
-        rules.push(json!({"inbound":["windows-tun"],"outbound":"s4-native-direct"}));
-        c["route"]["rule_set"] = json!([{"type":"local","tag":HOT_TAG,
-            "format":"source","path":HOT_PATH}]);
-    } else {
-        rules.push(json!({"inbound":["windows-tun"],"outbound":"desktop-selector"}));
-    }
+    // Always keep the same native rule graph while TUN is ON. The source
+    // file alone decides ALL vs SELECTED, using sing-box native file watching.
+    rules.push(json!({"inbound":["windows-tun"],
+        "rule_set":[HOT_TAG],"outbound":"desktop-selector"}));
+    rules.push(json!({"inbound":["windows-tun"],"outbound":"s4-native-direct"}));
+    c["route"]["rule_set"] = json!([{"type":"local","tag":HOT_TAG,
+        "format":"source","path":HOT_PATH}]);
     let merged = crate::wsl_tun::attach(&c, wsl_layer.as_ref())?;
     config::validate(&merged)?;
     Ok(merged)
@@ -942,35 +946,66 @@ fn persist(
     }
     // Native sing-box watches this source rule-set itself; no lifecycle mutation.
     // The file is a derived projection of tun.json, never a second state owner.
-    if configured
-        && old.managed_tun
-        && next.managed_tun
-        && old.selected_apps
-        && next.selected_apps
-        && hot_native(&current)
-        && !route_changed
-    {
+    if configured && old.managed_tun && next.managed_tun && hot_native(&current) {
         if !crate::lifecycle::is_running()? {
             return Err("TUN_TASK_NOT_RUNNING");
         }
         hot_readback(old)?;
-        write_hot_rules(next)?;
-        if write_at(path, next).is_err() {
-            let rollback = write_hot_rules(old).and_then(|_| hot_readback(old));
-            return Err(if rollback.is_ok() {
-                "HOT_STATE_WRITE_ROLLED_BACK"
+        let previous_route = config::selected(&current, crate::model::Target::Desktop)?;
+        let route_update = desktop_route.filter(|route| *route != previous_route);
+        let file_update = rules_source(old) != rules_source(next);
+        // Selector PUT and file-watch reload do not stop the sole native
+        // dataplane. Neither this process nor MCP needs a detached supervisor.
+        let applied = (|| -> Result<(), &'static str> {
+            if let Some(route) = route_update {
+                crate::selector::select(
+                    &config::installed(),
+                    crate::model::Target::Desktop,
+                    route,
+                    true,
+                )?;
+            }
+            if file_update {
+                write_hot_rules(next)?;
+            }
+            hot_readback(next)?;
+            write_at(path, next)?;
+            if read_at(path)? != *next {
+                return Err("TUN_STATE_READBACK_MISMATCH");
+            }
+            confirm_native()?;
+            Ok(())
+        })();
+        if applied.is_err() {
+            // Roll back only our own rules, desired switches and selector.
+            // A failed/incomplete rollback must never be reported as success.
+            let rules_restored =
+                !file_update || write_hot_rules(old).and_then(|_| hot_readback(old)).is_ok();
+            let route_restored = route_update.is_none()
+                || crate::selector::select(
+                    &config::installed(),
+                    crate::model::Target::Desktop,
+                    previous_route,
+                    true,
+                )
+                .is_ok();
+            let state_restored = match read_at(path) {
+                Ok(actual) if actual == *old => true,
+                Ok(actual) if actual == *next => write_at(path, old).is_ok(),
+                _ => false,
+            };
+            return Err(if rules_restored && route_restored && state_restored {
+                "TUN_HOT_CHANGE_ROLLED_BACK"
             } else {
-                "HOT_RULESET_ROLLBACK_UNKNOWN"
+                "TUN_HOT_ROLLBACK_UNCONFIRMED"
             });
         }
-        hot_readback(next)?;
-        return Ok(
-            json!({"ok":true,"changed":true,"managed_tun":next.managed_tun,
-            "selected_apps":next.selected_apps,"applications":next.applications,
-            "singbox_restarted":false,"hot_reload":"NATIVE_FILE_WATCHER",
-            "runtime_confirmed":false,"egress":"NOT_TESTED_BY_APPLY",
-            "next_action":"internet app diagnose <EXE>"}),
-        );
+        return Ok(json!({"ok":true,"changed":true,
+            "managed_tun":next.managed_tun,"selected_apps":next.selected_apps,
+            "applications":next.applications,"singbox_restarted":false,
+            "hot_reload":"NATIVE_FILE_WATCHER","runtime_confirmed":false,
+            "egress":"NOT_TESTED_BY_APPLY",
+            "next_action":"Verify new Windows HTTPS flows and MCP path"}));
     }
     let needs_restart = configured || old.managed_tun || next.managed_tun || route_changed;
     if !needs_restart {
@@ -986,11 +1021,17 @@ fn persist(
             vec![]
         };
         let updated = render_native(&planned, next, &ips)?;
-        if next.managed_tun && next.selected_apps {
+        if next.managed_tun {
             write_hot_rules(next)?;
         }
         candidate_check(&updated)?;
         if updated != current {
+            // A live TUN may carry our sole remote MCP control session.
+            // Never kill that dataplane synchronously: ALL/SELECTED already
+            // use native hot rules above; other transitions fail closed.
+            if configured && crate::lifecycle::is_running()? {
+                control_endpoints()?;
+            }
             if crate::lifecycle::stop().is_err() {
                 let _ = crate::lifecycle::start();
                 return Err("TUN_STOP_UNCONFIRMED");
@@ -1170,6 +1211,27 @@ mod tests {
             classify_tun_status(false, false, false, Ok(true)),
             (Health::Failed, "TUN_NATIVE_STATE_MISMATCH")
         );
+    }
+    #[test]
+    fn all_mode_uses_native_hot_source_without_restarting_the_route_graph() {
+        let mut selected = Settings::default();
+        selected.managed_tun = true;
+        selected.selected_apps = true;
+        selected.applications = vec!["example.exe".into()];
+        let all = mode_transition(&selected, WindowsMode::All).unwrap();
+        assert_eq!(all.applications, selected.applications);
+        assert_eq!(
+            rules_source(&all),
+            json!({
+                "version":3,"rules":[{"network":["tcp","udp","icmp"]}]
+            })
+        );
+        assert_eq!(
+            rules_source(&selected)["rules"][0]["process_name"],
+            json!(["example.exe"])
+        );
+        let restored = mode_transition(&all, WindowsMode::Selected).unwrap();
+        assert_eq!(rules_source(&restored), rules_source(&selected));
     }
     #[test]
     fn operator_modes_preserve_selected_application_inventory() {
