@@ -254,10 +254,16 @@ mod tests {
         assert!(layer.unwrap().outbound.is_none());
         let mut unsafe_endpoint = modern.clone();
         unsafe_endpoint.endpoint["bind_interface"] = json!("Ethernet");
-        assert_eq!(check_layer(&unsafe_endpoint), Err("WSL_WG_ENDPOINT_UNOWNED"));
+        assert_eq!(
+            check_layer(&unsafe_endpoint),
+            Err("WSL_WG_ENDPOINT_UNOWNED")
+        );
         unsafe_endpoint = modern.clone();
         unsafe_endpoint.endpoint["listen_port"] = json!(443);
-        assert_eq!(check_layer(&unsafe_endpoint), Err("WSL_WG_ENDPOINT_UNOWNED"));
+        assert_eq!(
+            check_layer(&unsafe_endpoint),
+            Err("WSL_WG_ENDPOINT_UNOWNED")
+        );
 
         let legacy = Layer {
             endpoint: json!({
