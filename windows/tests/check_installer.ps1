@@ -37,7 +37,9 @@ try {
     if($task.State -eq 'Running' -or
        @($task.Triggers | Where-Object { $null -ne $_ }).Count -ne 0 -or
        $task.Actions.Execute -cne 'C:\internet\sing-box.exe' -or
-       $details.Task.Principals.Principal.UserId -cne 'S-1-5-18'){
+       $details.Task.Principals.Principal.UserId -cne 'S-1-5-18' -or
+       $task.Settings.RestartCount -ne 3 -or
+       [string]$task.Settings.RestartInterval -cne 'PT1M'){
         throw 'INSTALL_TASK_SCOPE_INVALID'
     }
     'OWNED_NATIVE_TASK_READY=PASS'
@@ -48,6 +50,27 @@ try {
         throw 'REINSTALL_BINARY_CHANGED'
     }
     'FRESH_INSTALL_AND_NOOP=PASS'
+
+    # Simulate the previous native task policy on a disposable CI host.
+    # Same installer repairs its own task without starting any network process.
+    $legacy = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    Set-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\' -Settings $legacy -ErrorAction Stop | Out-Null
+    $policyBefore = Get-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\' -ErrorAction Stop
+    if ($policyBefore.Settings.RestartCount -ne 0) { throw 'LEGACY_POLICY_FIXTURE_INVALID' }
+    $repaired = @(& ./windows/install.ps1 -PackagePath $PackagePath)
+    if ($repaired -notcontains 'INSTALL_TASK_RECOVERY=PASS') {
+        throw 'NATIVE_TASK_POLICY_NOT_REPAIRED'
+    }
+    $policyAfter = Get-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\' -ErrorAction Stop
+    if ($policyAfter.State -eq 'Running' -or
+        $policyAfter.Settings.RestartCount -ne 3 -or
+        [string]$policyAfter.Settings.RestartInterval -cne 'PT1M' -or
+        (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -cne $baseline) {
+        throw 'NATIVE_TASK_POLICY_REPAIR_STATE_INVALID'
+    }
+    $again = @(& ./windows/install.ps1 -PackagePath $PackagePath)
+    if ($again -notcontains 'INSTALL_NOOP=PASS') { throw 'RECOVERY_POLICY_REINSTALL_NOT_NOOP' }
+    'NATIVE_TASK_RECOVERY_UPGRADE=PASS'
 
     # Real stopped-restore test only on disposable CI Windows with fake auth.
     & python (Join-Path $PSScriptRoot 'check_restore.py')
