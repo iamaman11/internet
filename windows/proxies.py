@@ -40,7 +40,11 @@ def probe(item, ip, domain, auth):
     mode, protocol, port, scheme = item
     host = domain if scheme == "https" else ip
     url = f"{scheme}://{host}:{port}"
-    args = ["curl", "-4", "--silent", "--fail", "--noproxy", "",
+    # The Vault runner lives in WSL, but these are Windows proxy endpoints.
+    # Linux curl would hairpin through the WSL kernel WireGuard when U7 is ON.
+    # Native Windows curl keeps the probe on the Windows path, with credentials
+    # supplied only via private stdin (-K -), never argv or any on-disk file.
+    args = ["/mnt/c/Windows/System32/curl.exe", "-4", "--silent", "--fail", "--noproxy", "",
             "--proxy", url, "--connect-timeout", "4", "--max-time", "10",
             "-K", "-", "https://api.ipify.org"]
     if scheme == "https":
