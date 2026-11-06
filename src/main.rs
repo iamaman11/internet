@@ -369,6 +369,12 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
     };
     match effect {
         Ok(v) => {
+            // A completed diagnostic with ok=false is still a failed check.
+            // Do not report exit 0 to PowerShell, CI or dependent operations.
+            if matches!(a.as_slice(), ["wsl", "tun", "diagnose"]) && v["ok"] != true {
+                emit(&v, json_mode);
+                return 3;
+            }
             if command == "proxies" && !json_mode {
                 print_proxy_list(&v);
             } else if !json_mode
