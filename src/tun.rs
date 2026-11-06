@@ -1214,10 +1214,12 @@ mod tests {
     }
     #[test]
     fn all_mode_uses_native_hot_source_without_restarting_the_route_graph() {
-        let mut selected = Settings::default();
-        selected.managed_tun = true;
-        selected.selected_apps = true;
-        selected.applications = vec!["example.exe".into()];
+        let selected = Settings {
+            managed_tun: true,
+            selected_apps: true,
+            applications: vec!["example.exe".into()],
+            ..Settings::default()
+        };
         let all = mode_transition(&selected, WindowsMode::All).unwrap();
         assert_eq!(all.applications, selected.applications);
         assert_eq!(
