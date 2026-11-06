@@ -16,6 +16,8 @@ $written = @()
 $createdRoot = $false
 $success = $false
 $createdTask = $false
+$updatedTaskSettings = $false
+$previousTaskSettings = $null
 $taskName = 'INTERNET-SingBox'
 function Test-InternetOwnedTask {
     $task = Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction SilentlyContinue
@@ -124,7 +126,14 @@ try {
         $changed += $name
     }
     $taskOwned = Test-InternetOwnedTask
-    if ($changed.Count -eq 0 -and (Test-Path -LiteralPath $marker) -and $taskOwned) {
+    $taskPolicyNeedsUpdate = $false
+    if ($taskOwned) {
+        $taskSettings = (Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop).Settings
+        $taskPolicyNeedsUpdate = $taskSettings.RestartCount -ne 3 -or
+            [string]$taskSettings.RestartInterval -cne 'PT1M'
+    }
+    if ($changed.Count -eq 0 -and (Test-Path -LiteralPath $marker) -and
+        $taskOwned -and -not $taskPolicyNeedsUpdate) {
         Write-Output 'INSTALL_NOOP=PASS'
         $success = $true
         return
@@ -164,13 +173,27 @@ try {
     # The existing Windows Task Scheduler is the sole persistent lifecycle owner.
     # Registration happens once at installation, never during a CLI start command.
     # There are no triggers: installation cannot start or reroute network traffic.
-    if (-not $taskOwned) {
-        $action = New-ScheduledTaskAction -Execute (Join-Path $root 'sing-box.exe') -Argument 'run -c "C:\internet\config\sing-box.json"' -WorkingDirectory $root
-        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-        $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-        Register-ScheduledTask -TaskName $taskName -TaskPath '\' -Action $action -Principal $principal -Settings $settings -Description 'INTERNET owned sing-box (manual start)' -ErrorAction Stop | Out-Null
-        $createdTask = $true
-        if (-not (Test-InternetOwnedTask)) { throw 'TASK_INSTALL_READBACK_FAILED' }
+    if (-not $taskOwned -or $taskPolicyNeedsUpdate) {
+        # Native Task Scheduler owns crash restart; no extra service/controller.
+        # This is not a substitute for transaction rollback of invalid network config.
+        $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+        if (-not $taskOwned) {
+            $action = New-ScheduledTaskAction -Execute (Join-Path $root 'sing-box.exe') -Argument 'run -c "C:\internet\config\sing-box.json"' -WorkingDirectory $root
+            $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+            Register-ScheduledTask -TaskName $taskName -TaskPath '\' -Action $action -Principal $principal -Settings $settings -Description 'INTERNET owned sing-box (manual start)' -ErrorAction Stop | Out-Null
+            $createdTask = $true
+        } else {
+            $previousTaskSettings = $taskSettings
+            Set-ScheduledTask -TaskName $taskName -TaskPath '\' -Settings $settings -ErrorAction Stop | Out-Null
+            $updatedTaskSettings = $true
+        }
+        $readback = Get-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop
+        if (-not (Test-InternetOwnedTask) -or
+            $readback.Settings.RestartCount -ne 3 -or
+            [string]$readback.Settings.RestartInterval -cne 'PT1M') {
+            throw 'TASK_RECOVERY_READBACK_FAILED'
+        }
+        Write-Output 'INSTALL_TASK_RECOVERY=PASS'
     }
     Set-Content -LiteralPath $marker -Value $owner -NoNewline
     Write-Output 'INSTALL_FILES=PASS'
@@ -180,6 +203,9 @@ try {
 }
 finally {
     if (-not $success) {
+        if ($updatedTaskSettings -and $null -ne $previousTaskSettings) {
+            Set-ScheduledTask -TaskName $taskName -TaskPath '\' -Settings $previousTaskSettings -ErrorAction Stop | Out-Null
+        }
         if ($createdTask) {
             # Roll back only the task registered by this exact attempt.
             if (Test-InternetOwnedTask) {
