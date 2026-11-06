@@ -551,8 +551,11 @@ mod tests {
         validate(&all_native).unwrap();
         assert_eq!(all_native["endpoints"], with_wg["endpoints"]);
         assert_eq!(
-            all_native["outbounds"].as_array().unwrap().last().unwrap(),
-            with_wg["outbounds"].as_array().unwrap().last().unwrap()
+            &all_native["outbounds"].as_array().unwrap()[..with_wg["outbounds"]
+                .as_array()
+                .unwrap()
+                .len()],
+            with_wg["outbounds"].as_array().unwrap().as_slice()
         );
         assert_eq!(
             all_native["route"]["rules"].as_array().unwrap().len(),
@@ -569,12 +572,8 @@ mod tests {
         malformed["endpoints"][0]["peers"][0]["address"] = serde_json::json!("127.0.0.1");
         assert_eq!(validate(&malformed), Err("WSL_WG_PEER_INVALID"));
         malformed = with_wg.clone();
-        malformed["outbounds"]
-            .as_array_mut()
-            .unwrap()
-            .last_mut()
-            .unwrap()["bind_interface"] = serde_json::json!("Ethernet");
-        assert_eq!(validate(&malformed), Err("WSL_TRANSPORT_INTERFACE_INVALID"));
+        malformed["endpoints"][0]["bind_interface"] = serde_json::json!("Ethernet");
+        assert_eq!(validate(&malformed), Err("WSL_WG_ENDPOINT_UNOWNED"));
         malformed = with_wg.clone();
         malformed["route"]["rules"]
             .as_array_mut()
