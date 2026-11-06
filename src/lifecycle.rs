@@ -241,12 +241,9 @@ mod native {
         }
         // A failed start may have fallen back to the owned WSL loopback
         // listener. Never overwrite a concurrent or foreign modification.
-        let current = config::read(&path)
-            .map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
+        let current = config::read(&path).map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
         if current != original
-            && config::with_wsl_loopback(&original)
-                .as_ref()
-                .ok() != Some(&current)
+            && config::with_wsl_loopback(&original).as_ref().ok() != Some(&current)
         {
             return Err("TASK_RESTART_CONFIG_OWNER_CONFLICT");
         }
