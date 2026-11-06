@@ -14,6 +14,7 @@ LOCAL_RULE = "163"
 TUNNEL_RULE = "164"
 ORIGINAL_RESOLV = "/mnt/wsl/resolv.conf"
 STUB_RESOLV = "/run/systemd/resolve/stub-resolv.conf"
+NATIVE_RESOLV = "nameserver 1.1.1.1\nnameserver 8.8.8.8\n"
 
 def run(*args, check=True):
     p = subprocess.run(args, capture_output=True, text=True, timeout=20)
@@ -55,6 +56,67 @@ def dns_target():
     p = pathlib.Path("/etc/resolv.conf")
     return os.readlink(p) if p.is_symlink() else "NOT_SYMLINK"
 
+def dns_ready():
+    """WSL must not replace the resolver on the next wsl.exe invocation."""
+    conf = pathlib.Path("/etc/wsl.conf")
+    resolv = pathlib.Path("/etc/resolv.conf")
+    if not conf.is_file() or resolv.is_symlink() or not resolv.is_file():
+        return False
+    try:
+        import configparser
+        ini = configparser.ConfigParser()
+        ini.read_string(conf.read_text())
+        if not ini.has_section("network") or not ini.getboolean("network", "generateResolvConf", fallback=True) is False:
+            return False
+        return resolv.stat().st_uid == 0 and resolv.read_text() == NATIVE_RESOLV
+    except (OSError, UnicodeError, ValueError, configparser.Error):
+        return False
+
+def dns_setup():
+    if interface_exists() or owned_rules()[2]:
+        raise RuntimeError("WSL_DNS_SETUP_TUN_OWNED")
+    if dns_ready():
+        print(json.dumps({"ok": True, "changed": False, "reboot_required": False}))
+        return
+    # Only provision the stock WSL-owned resolver. Foreign DNS policy is never replaced.
+    if dns_target() != ORIGINAL_RESOLV:
+        raise RuntimeError("WSL_DNS_SETUP_OWNER_CONFLICT")
+    conf = pathlib.Path("/etc/wsl.conf").read_text()
+    if len(conf) > 8192 or "[network]" in conf.lower() or "generateResolvConf" in conf:
+        raise RuntimeError("WSL_DNS_SETUP_OWNER_CONFLICT")
+    # Same one-shot native guest executor, no daemon, helper, or second state store.
+    root_code = """import os,pathlib,subprocess,tempfile
+p=pathlib.Path('/etc/wsl.conf')
+r=pathlib.Path('/etc/resolv.conf')
+original=p.read_bytes()
+assert b'[network]' not in original.lower() and os.readlink(r)=='/mnt/wsl/resolv.conf'
+mode=p.stat().st_mode & 0o777
+def replace(path,content,mode):
+ fd,name=tempfile.mkstemp(dir='/etc',prefix='.internet-dns-tmp-')
+ try:
+  os.fchmod(fd,mode)
+  with os.fdopen(fd,'wb') as f:
+   f.write(content);f.flush();os.fsync(f.fileno())
+  os.replace(name,path)
+ finally:
+  if os.path.exists(name): os.unlink(name)
+try:
+ replace(p,original+b'\\n[network]\\ngenerateResolvConf=false\\n',mode)
+ replace(r,b'nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n',0o644)
+ result=subprocess.run(['/usr/bin/getent','ahostsv4','example.com'],capture_output=True,timeout=10)
+ if result.returncode: raise RuntimeError('DNS_NATIVE_PROBE_FAILED')
+except BaseException:
+ replace(p,original,mode)
+ if r.exists() or r.is_symlink():r.unlink()
+ r.symlink_to('/mnt/wsl/resolv.conf')
+ raise
+"""
+    result = sudo("/usr/bin/python3", "-c", root_code, check=False)
+    if result.returncode or not dns_ready():
+        raise RuntimeError("WSL_DNS_SETUP_FAILED")
+    print(json.dumps({"ok": True, "changed": True, "reboot_required": True,
+                      "next_action": "Restart only Ubuntu WSL; verify native DNS and NAT"}))
+
 def route_state():
     own_main, own_table, any_rules = owned_rules()
     route = run("/usr/sbin/ip", "-4", "route", "show", "table", TABLE, check=False).stdout.splitlines()
@@ -70,7 +132,7 @@ def route_state():
     eth = run("/usr/sbin/ip", "-4", "-o", "addr", "show", "dev", "eth0").stdout.split()
     guest_ip = eth[3].split("/")[0] if len(eth) >= 4 and eth[2] == "inet" else "UNKNOWN"
     return dict(guest_ipv4=guest_ip, kernel_interface=interface_exists(), handshake_observed=handshake, route_active=own_main and own_table and exact,
-                owned_route_rules=any_rules, dns_redirected=dns_target() == STUB_RESOLV,
+                owned_route_rules=any_rules, dns_redirected=own_main and own_table and exact and dns_ready(),
                 ipv6_guard=guard, unexpected_route=bool(route) and not exact,
                 default_nat=run("/usr/sbin/ip", "-4", "route", "show", "default").stdout.strip())
 
@@ -82,6 +144,8 @@ def prepare(public):
         raise RuntimeError("WSL_WG_ALREADY_PRESENT")
     if owned_rules()[2]:
         raise RuntimeError("WSL_WG_ORPHAN_RULE")
+    if not dns_ready():
+        raise RuntimeError("WSL_NATIVE_DNS_SETUP_REQUIRED")
     # Native root-only working key. Provisioning/recovery is outside runtime.
     meta = sudo("/usr/bin/stat", "-c", "%u:%a", KEY_FILE, check=False)
     if meta.returncode or meta.stdout.strip() != "0:600":
@@ -107,34 +171,22 @@ def activate(public):
     if (state["owned_route_rules"] or state["unexpected_route"] or state["dns_redirected"]
             or state["ipv6_guard"]):
         raise RuntimeError("WSL_WG_PARTIAL_STATE_REFUSE")
-    if dns_target() != ORIGINAL_RESOLV:
-        raise RuntimeError("WSL_RESOLV_OWNER_CONFLICT")
-    if not pathlib.Path(STUB_RESOLV).is_file():
-        raise RuntimeError("WSL_RESOLVED_STUB_MISSING")
+    if not dns_ready():
+        raise RuntimeError("WSL_NATIVE_DNS_SETUP_REQUIRED")
     if run("/usr/sbin/ip", "-6", "route", "show", "default").stdout.strip():
         raise RuntimeError("WSL_IPV6_DEFAULT_CONFLICT")
-    if not run("/usr/bin/systemctl", "is-active", "systemd-resolved", check=False).returncode == 0:
-        raise RuntimeError("WSL_RESOLVED_NOT_ACTIVE")
-    try:
+     try:
         sudo("/usr/sbin/ip", "-4", "route", "add", "default", "dev", IFACE, "table", TABLE)
         sudo("/usr/sbin/ip", "-4", "rule", "add", "priority", LOCAL_RULE, "lookup",
              "main", "suppress_prefixlength", "0")
         sudo("/usr/sbin/ip", "-4", "rule", "add", "priority", TUNNEL_RULE, "lookup", TABLE)
         sudo("/usr/sbin/ip", "-6", "route", "add", "unreachable", "default", "metric", "1")
-        sudo("/usr/bin/resolvectl", "dns", IFACE, "1.1.1.1", "8.8.8.8")
-        sudo("/usr/bin/resolvectl", "domain", IFACE, "~.")
-        sudo("/usr/bin/resolvectl", "default-route", IFACE, "yes")
-        # WSL owns the original resolver symlink; restore it exactly on OFF.
-        sudo("/usr/bin/ln", "-sfn", STUB_RESOLV, "/etc/resolv.conf")
-        state = route_state()
+         state = route_state()
         if not (state["route_active"] and state["dns_redirected"] and state["ipv6_guard"]):
             raise RuntimeError("WSL_WG_APPLY_READBACK_FAILED")
         print(json.dumps({"ok": True, "changed": True, "phase": "guest_full_route_active"}))
     except Exception:
-        # Only own address, rule priorities and exact resolver symlink are touched.
-        if dns_target() == STUB_RESOLV:
-            sudo("/usr/bin/ln", "-sfn", ORIGINAL_RESOLV, "/etc/resolv.conf", check=False)
-        sudo("/usr/bin/resolvectl", "revert", IFACE, check=False)
+        # The native DNS file is stable across TUN ON/OFF; only owned routes change.
         sudo("/usr/sbin/ip", "-6", "route", "del", "unreachable", "default",
              "metric", "1", check=False)
         sudo("/usr/sbin/ip", "-4", "rule", "del", "priority", TUNNEL_RULE,
@@ -155,11 +207,8 @@ def deactivate(public):
     state = route_state()
     if state["unexpected_route"] or (state["owned_route_rules"] and not state["route_active"]):
         raise RuntimeError("WSL_WG_UNOWNED_ROUTE_REFUSE")
-    if dns_target() not in (ORIGINAL_RESOLV, STUB_RESOLV):
-        raise RuntimeError("WSL_RESOLV_OWNER_CONFLICT")
-    if state["dns_redirected"]:
-        sudo("/usr/bin/ln", "-sfn", ORIGINAL_RESOLV, "/etc/resolv.conf")
-        sudo("/usr/bin/resolvectl", "revert", IFACE, check=False)
+    if not dns_ready():
+        raise RuntimeError("WSL_NATIVE_DNS_SETUP_REQUIRED")
     if state["route_active"]:
         sudo("/usr/sbin/ip", "-4", "rule", "del", "priority", TUNNEL_RULE)
         sudo("/usr/sbin/ip", "-4", "rule", "del", "priority", LOCAL_RULE)
@@ -181,11 +230,13 @@ def main():
         if len(key) != 44 or not key.endswith("="):
             raise RuntimeError("WSL_GUEST_PUBLIC_INVALID")
         print(json.dumps({"ok": True, "public_key": key}))
+    elif action == "dns-setup":
+        dns_setup()
     elif action == "status":
         state = route_state()
         state["ok"] = True
-        state["dns_target_kind"] = ("wsl_generated" if dns_target() == ORIGINAL_RESOLV
-                                     else "resolved_stub" if dns_target() == STUB_RESOLV
+        state["dns_target_kind"] = ("native_static" if dns_ready()
+                                     else "wsl_generated" if dns_target() == ORIGINAL_RESOLV
                                      else "unknown")
         print(json.dumps(state))
     elif action == "prepare" and len(sys.argv) == 3:
