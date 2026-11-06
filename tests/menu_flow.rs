@@ -93,7 +93,7 @@ fn menu_uses_one_column_and_explains_full_tun_scope() {
     assert!(
         normalized.contains("1. Start managed sing-box (idempotent)\n2. Stop managed sing-box")
     );
-    assert!(normalized.contains("1. Route via VM (save VM selection)"));
+    assert!(normalized.contains("1. Use current Windows selector (DIRECT via VM / WARP)"));
     assert!(normalized.contains("3. Enter exact EXE path"));
 }
 
