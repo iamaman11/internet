@@ -15,7 +15,7 @@ TUNNEL_RULE = "164"
 ORIGINAL_RESOLV = "/mnt/wsl/resolv.conf"
 STUB_RESOLV = "/run/systemd/resolve/stub-resolv.conf"
 RESOLVED_CONF = "/etc/systemd/resolved.conf.d/internet-wsl.conf"
-RESOLVED_POLICY = "[Resolve]\\nDNS=1.1.1.1 8.8.8.8\\n"
+RESOLVED_POLICY = "[Resolve]\nDNS=1.1.1.1 8.8.8.8\n"
 
 def run(*args, check=True):
     p = subprocess.run(args, capture_output=True, text=True, timeout=20)
