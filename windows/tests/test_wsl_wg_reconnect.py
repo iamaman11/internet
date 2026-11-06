@@ -48,6 +48,7 @@ class NativeWireguardReconnectTests(unittest.TestCase):
             "sudo": sudo, "interface_exists": lambda: False,
             "owned_rules": lambda: (False, False, False),
             "wsl_gateway": lambda: "172.26.16.1",
+            "dns_ready": lambda: True,
             "assert_owned": lambda: None,
             "IFACE": "internet-wsl", "IP": "10.222.28.2/30",
             "PORT": "43912", "KEY_FILE": "/etc/wireguard/internet-wsl.key",
