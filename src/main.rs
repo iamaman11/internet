@@ -288,6 +288,9 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         ("wsl", ["wsl", "tun", "status"]) => wsl_tun_runtime::status(),
         ("wsl", ["wsl", "tun", "diagnose"]) => wsl_tun_runtime::diagnose(),
         ("wsl", ["wsl", "tun", "on"]) => wsl_tun_runtime::on(),
+        ("wsl", ["wsl", "tun", "on", "--allow-mcp-reconnect"]) => {
+            wsl_tun_runtime::on_allow_mcp_reconnect()
+        },
         ("wsl", ["wsl", "tun", "off"]) => wsl_tun_runtime::off(),
         ("tun", ["tun", "status"]) | ("selected-apps", ["selected-apps", "status"]) => {
             tun::status()
@@ -357,7 +360,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         ("help", _) | ("--help", _) => Ok(
             json!({"version":env!("CARGO_PKG_VERSION"),"commands":["status [--deep]","tree","inspect <id>","diagnose [id]",
             "route <direct-auto|direct-hysteria2|direct-vless|warp-auto|warp-hysteria2|warp-vless>",
-            "wsl route <same>","wsl tun <on|off|status|diagnose>","wsl sync (offline attach)","start","stop","restart","configure --stdin",
+            "wsl route <same>","wsl tun <on|off|status|diagnose>","wsl tun on --allow-mcp-reconnect (detached local CLI only)","wsl sync (offline attach)","start","stop","restart","configure --stdin",
             "backup export <external-directory>","restore <external-directory>",
              "windows-mode <normal|selected|all|status>",
              "tun <status|on|off>","selected-apps <status|on|off|add EXE|remove EXE>",
