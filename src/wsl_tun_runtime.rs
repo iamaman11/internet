@@ -354,7 +354,9 @@ mod native {
             return Err("WSL_TUN_WINDOWS_NOT_RUNNING");
         }
         // Never silently restart a managed Windows TUN/control connection.
-        if needs_update && running && crate::tun::status()?["managed_tun"] == true
+        if needs_update
+            && running
+            && crate::tun::status()?["managed_tun"] == true
             && !allow_mcp_reconnect
         {
             return Err("WSL_TUN_RESTART_CONTROL_NOT_VERIFIED");
