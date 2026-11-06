@@ -484,7 +484,7 @@ pub fn off() -> Result<Value, &'static str> {
     Err("WINDOWS_ONLY")
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::*;
     #[test]
