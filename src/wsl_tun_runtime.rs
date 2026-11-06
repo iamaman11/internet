@@ -130,6 +130,7 @@ mod native {
                 Some("WSL_DNS_SETUP_TUN_OWNED") => "WSL_DNS_SETUP_TUN_OWNED",
                 Some("WSL_DNS_SETUP_FAILED") => "WSL_DNS_SETUP_FAILED",
                 Some("WSL_WG_ORPHAN_RULE") => "WSL_WG_ORPHAN_RULE",
+                Some("WSL_NATIVE_GATEWAY_INVALID") => "WSL_NATIVE_GATEWAY_INVALID",
                 Some("WSL_WG_ALREADY_PRESENT") => "WSL_WG_ALREADY_PRESENT",
                 Some("WSL_WG_INTERFACE_UNOWNED") => "WSL_WG_INTERFACE_UNOWNED",
                 Some("WSL_WG_KEY_UNOWNED") => "WSL_WG_KEY_UNOWNED",
@@ -357,11 +358,17 @@ mod native {
         let windows_pub = windows_public(&windows_private)?;
         let ip = network.guest.to_string();
         let peer = &old["endpoints"][0]["peers"][0];
-        let native_if = old["outbounds"]
-            .as_array()
-            .and_then(|a| a.last())
-            .and_then(|v| v["bind_interface"].as_str());
+        let native_if = if old["endpoints"][0]["listen_port"].is_number() {
+            old["endpoints"][0]["bind_interface"].as_str()
+        } else {
+            old["outbounds"]
+                .as_array()
+                .and_then(|a| a.last())
+                .and_then(|v| v["bind_interface"].as_str())
+        };
         let needs_update = !configured
+            || old["endpoints"][0]["listen_port"].as_u64()
+                != Some(u64::from(wsl_tun::WINDOWS_WG_LISTEN_PORT))
             || peer["address"].as_str() != Some(ip.as_str())
             || peer["public_key"].as_str() != Some(guest_pub.as_str())
             || old["endpoints"][0]["private_key"].as_str() != Some(windows_private.as_str())
@@ -397,6 +404,10 @@ mod native {
         } else {
             old.clone()
         };
+        // The existing Rust CLI owns the only native WG UDP firewall rule.
+        // It is scoped to the current Ubuntu guest and the WSL vEthernet.
+        // Never restart Windows or change Ubuntu routes if this readback fails.
+        wsl::wireguard_firewall_allow(&network, &interface)?;
         // Guest prepare preserves the NAT default route until handshake.
         guest("prepare", Some(&windows_pub))?;
         let mut modified_windows = false;
@@ -409,6 +420,10 @@ mod native {
                 modified_windows = true;
                 lifecycle::start()?;
             }
+            // Send an isolated peer packet before changing Ubuntu's default
+            // route; a fresh kernel WG interface must initiate a handshake
+            // even when Windows sing-box was already running for hours.
+            guest("probe", None)?;
             let deadline = Instant::now() + Duration::from_secs(25);
             let mut handshake = false;
             while Instant::now() < deadline {
