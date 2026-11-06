@@ -560,7 +560,8 @@ fn native_wsl_tun(deep: bool) -> Diagnostic {
                 } else if v["reason_code"] == "WSL_NATIVE_IP_MISMATCH" {
                     d.health = Health::Failed;
                     d.reason_code = "WSL_NATIVE_IP_MISMATCH";
-                    d.next_action = "Check current VM egress and the WSL selector; do not switch Windows";
+                    d.next_action =
+                        "Check current VM egress and the WSL selector; do not switch Windows";
                 } else {
                     d.reason_code = "WSL_NATIVE_EGRESS_NOT_CONFIRMED";
                     d.next_action = "internet wsl tun diagnose";
