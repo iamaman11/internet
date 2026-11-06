@@ -156,6 +156,24 @@ mod native {
             Err("TASK_NOT_INSTALLED")
         }
     }
+    fn enable_task() -> Result<(), &'static str> {
+        ensure_task()?;
+        let out = command("schtasks.exe", &["/Change", "/TN", TASK, "/Enable"])?;
+        if !out.status.success() {
+            return Err("TASK_ENABLE_REJECTED");
+        }
+        Ok(())
+    }
+    fn disable_task() -> Result<(), &'static str> {
+        if task_receipt()?.is_none() {
+            return Ok(());
+        }
+        let out = command("schtasks.exe", &["/Change", "/TN", TASK, "/Disable"])?;
+        if !out.status.success() {
+            return Err("TASK_DISABLE_REJECTED");
+        }
+        Ok(())
+    }
     pub fn start() -> Result<(), &'static str> {
         let path = config::installed();
         let current = config::read(&path)?;
@@ -163,6 +181,10 @@ mod native {
             if crate::selector::runtime_selected(crate::model::Target::Desktop).is_ok()
                 && crate::selector::runtime_selected(crate::model::Target::Wsl).is_ok()
             {
+                // The existing native task owns both lifecycle and recovery.
+                // Re-enable after an interrupted explicit Stop; IgnoreNew
+                // prevents duplicate native sing-box instances.
+                enable_task()?;
                 return Ok(());
             }
             return Err("RUNNING_SING_BOX_UNHEALTHY");
@@ -175,7 +197,7 @@ mod native {
         let updated = crate::wsl::windows_start_config(&current)?;
         checked_replace(&path, &current, &updated)?;
         native_check(&path)?;
-        ensure_task()?;
+        enable_task()?;
         let o = command("schtasks.exe", &["/Run", "/TN", TASK])?;
         if !o.status.success() {
             return Err("TASK_START_REJECTED");
@@ -207,7 +229,11 @@ mod native {
         checked_replace(&path, &current, &updated)
     }
     pub fn stop() -> Result<(), &'static str> {
-        if !is_running()? {
+        let running = is_running()?;
+        // Disable scheduled recovery BEFORE ending the task. Otherwise the
+        // next native trigger would undo an explicit operator Stop.
+        disable_task()?;
+        if !running {
             return Ok(());
         }
         let o = command("schtasks.exe", &["/End", "/TN", TASK])?;

@@ -34,8 +34,10 @@ try {
     }
     $task=Get-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\' -ErrorAction Stop
     $details=[xml](Export-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\')
-    if($task.State -eq 'Running' -or
-       @($task.Triggers | Where-Object { $null -ne $_ }).Count -ne 0 -or
+    if($task.State -ne 'Disabled' -or
+       @($task.Triggers | Where-Object { $null -ne $_ }).Count -ne 1 -or
+       [string]$details.Task.Triggers.TimeTrigger.Repetition.Interval -cne 'PT1M' -or
+       -not [string]::IsNullOrEmpty([string]$details.Task.Triggers.TimeTrigger.Repetition.Duration) -or
        $task.Actions.Execute -cne 'C:\internet\sing-box.exe' -or
        $details.Task.Principals.Principal.UserId -cne 'S-1-5-18' -or
        $task.Settings.RestartCount -ne 3 -or
@@ -50,6 +52,16 @@ try {
         throw 'REINSTALL_BINARY_CHANGED'
     }
     'FRESH_INSTALL_AND_NOOP=PASS'
+
+    # Enabled means desired automatic recovery; explicit Rust Stop must
+    # disable that same native task even when it has no live process.
+    Enable-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\' -ErrorAction Stop | Out-Null
+    & $exe stop --json | Out-Null
+    if ($LASTEXITCODE -ne 0 -or
+        (Get-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\').State -ne 'Disabled') {
+        throw 'EXPLICIT_STOP_DID_NOT_DISARM_NATIVE_RECOVERY'
+    }
+    'EXPLICIT_STOP_DISARMS_NATIVE_RECOVERY=PASS'
 
     # Simulate the previous native task policy on a disposable CI host.
     # Same installer repairs its own task without starting any network process.
@@ -67,7 +79,10 @@ try {
         throw 'NATIVE_TASK_POLICY_NOT_REPAIRED'
     }
     $policyAfter = Get-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\' -ErrorAction Stop
-    if ($policyAfter.State -eq 'Running' -or
+    $afterXml = [xml](Export-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\')
+    if ($policyAfter.State -ne 'Disabled' -or
+        @($policyAfter.Triggers | Where-Object { $null -ne $_ }).Count -ne 1 -or
+        [string]$afterXml.Task.Triggers.TimeTrigger.Repetition.Interval -cne 'PT1M' -or
         $policyAfter.Settings.RestartCount -ne 3 -or
         [string]$policyAfter.Settings.RestartInterval -cne 'PT1M' -or
         (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -cne $baseline) {
@@ -178,7 +193,8 @@ finally {
         $xml=[xml](Export-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\')
         if($task.Actions.Execute -cne 'C:\internet\sing-box.exe' -or
            $xml.Task.Principals.Principal.UserId -cne 'S-1-5-18' -or
-           @($task.Triggers | Where-Object { $null -ne $_ }).Count -ne 0){
+           @($task.Triggers | Where-Object { $null -ne $_ }).Count -ne 1 -or
+           [string]$xml.Task.Triggers.TimeTrigger.Repetition.Interval -cne 'PT1M'){
             throw 'TEST_CLEANUP_TASK_OWNER_CONFLICT'
         }
         Unregister-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\' -Confirm:$false -ErrorAction Stop
