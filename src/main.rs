@@ -416,6 +416,12 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
                         "Check native Windows endpoint, current WSL adapter/guest IP and peer identity; Ubuntu NAT restored"
                     } else if code == "WSL_TUN_ROLLBACK_UNCONFIRMED" {
                         "Inspect Windows sing-box task and Ubuntu routes before attempting any further change"
+                    } else if code == "TASK_RESTART_RECOVERED" {
+                        "Original Windows sing-box config restarted healthy after initial failure; verify Windows TUN, MCP and real HTTPS egress"
+                    } else if code == "TASK_RESTART_RECOVERY_UNCONFIRMED" {
+                        "Native restart recovery failed; inspect existing sing-box task, config, Windows TUN and MCP before any further network change"
+                    } else if code == "TASK_RESTART_CONFIG_OWNER_CONFLICT" {
+                        "Windows configuration changed during restart; do not overwrite concurrent changes; inspect local owner and task"
                     } else { "internet help" }}),
                 json_mode,
             );
