@@ -78,16 +78,15 @@ fn check_layer(layer: &Layer) -> Result<(), &'static str> {
     {
         return Err("WSL_WG_PEER_INVALID");
     }
-    if let Some(outbound) = &layer.outbound {
-        if outbound["tag"] != TRANSPORT_TAG
+    if let Some(outbound) = &layer.outbound
+        && (outbound["tag"] != TRANSPORT_TAG
             || outbound["type"] != "direct"
             || outbound.as_object().is_none_or(|o| o.len() != 3)
             || outbound["bind_interface"]
                 .as_str()
-                .is_none_or(|s| !valid_wsl_interface(s))
-        {
-            return Err("WSL_TRANSPORT_INTERFACE_INVALID");
-        }
+                .is_none_or(|s| !valid_wsl_interface(s)))
+    {
+        return Err("WSL_TRANSPORT_INTERFACE_INVALID");
     }
     if layer.rule != expected_rule() {
         return Err("WSL_WG_ROUTE_UNOWNED");
