@@ -54,7 +54,12 @@ try {
     # Simulate the previous native task policy on a disposable CI host.
     # Same installer repairs its own task without starting any network process.
     $legacy = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-    Set-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\' -Settings $legacy -ErrorAction Stop | Out-Null
+    # Windows rejects Set-ScheduledTask with RestartCount=0 on this runner;
+    # registration is the native way to construct the original task schema.
+    Unregister-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\' -Confirm:$false -ErrorAction Stop
+    $legacyAction = New-ScheduledTaskAction -Execute 'C:\internet\sing-box.exe' -Argument 'run -c "C:\internet\config\sing-box.json"' -WorkingDirectory $root
+    $legacyPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    Register-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\' -Action $legacyAction -Principal $legacyPrincipal -Settings $legacy -Description 'INTERNET owned sing-box (manual start)' -ErrorAction Stop | Out-Null
     $policyBefore = Get-ScheduledTask -TaskName INTERNET-SingBox -TaskPath '\' -ErrorAction Stop
     if ($policyBefore.Settings.RestartCount -ne 0) { throw 'LEGACY_POLICY_FIXTURE_INVALID' }
     $repaired = @(& ./windows/install.ps1 -PackagePath $PackagePath)
