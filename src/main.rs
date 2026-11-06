@@ -2,7 +2,7 @@
 use internet::{
     config, diagnostic, lifecycle,
     model::{Health, ROUTES, Route, Target},
-    proxies, selector, tun,
+    proxies, selector, tun, wsl_tun_runtime,
 };
 use serde_json::{Value, json};
 
@@ -285,6 +285,10 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
             tun::WindowsMode::parse(mode).and_then(tun::windows_mode)
         }
         ("wsl", ["wsl", "route", r]) => apply_route(Target::Wsl, r),
+        ("wsl", ["wsl", "tun", "status"]) => wsl_tun_runtime::status(),
+        ("wsl", ["wsl", "tun", "diagnose"]) => wsl_tun_runtime::diagnose(),
+        ("wsl", ["wsl", "tun", "on"]) => wsl_tun_runtime::on(),
+        ("wsl", ["wsl", "tun", "off"]) => wsl_tun_runtime::off(),
         ("tun", ["tun", "status"]) | ("selected-apps", ["selected-apps", "status"]) => {
             tun::status()
         }
@@ -353,7 +357,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         ("help", _) | ("--help", _) => Ok(
             json!({"version":env!("CARGO_PKG_VERSION"),"commands":["status [--deep]","tree","inspect <id>","diagnose [id]",
             "route <direct-auto|direct-hysteria2|direct-vless|warp-auto|warp-hysteria2|warp-vless>",
-            "wsl route <same>","wsl sync (offline attach)","start","stop","restart","configure --stdin",
+            "wsl route <same>","wsl tun <on|off|status|diagnose>","wsl sync (offline attach)","start","stop","restart","configure --stdin",
             "backup export <external-directory>","restore <external-directory>",
              "windows-mode <normal|selected|all|status>",
              "tun <status|on|off>","selected-apps <status|on|off|add EXE|remove EXE>",
@@ -396,6 +400,22 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
                         "Check Windows interface ownership; internet diagnose windows/wsl-selector"
                     } else if code == "TUN_NATIVE_STATE_MISMATCH" {
                         "internet diagnose windows/tun"
+                    } else if code == "WSL_WINDOWS_KEY_NOT_PROVISIONED"
+                        || code == "WSL_WINDOWS_KEY_UNREADABLE"
+                        || code == "WSL_WINDOWS_KEY_INVALID" {
+                        "Provision native Windows key C:\\internet\\config\\wsl-wireguard.key from trusted recovery; do not print its value"
+                    } else if code == "WSL_GUEST_KEY_NOT_PROVISIONED" {
+                        "Provision root:root 0600 /etc/wireguard/internet-wsl.key from trusted recovery"
+                    } else if code == "WSL_TUN_RESTART_CONTROL_NOT_VERIFIED" {
+                        "Windows TUN/MCP unchanged; initial endpoint installation or stale WSL IP requires an independently verified control path"
+                    } else if code == "WSL_TUN_PEER_STALE_REQUIRES_RECONFIGURE" {
+                        "WSL NAT address changed; use guarded native WSL endpoint reconfiguration"
+                    } else if code == "WSL_TUN_GUEST_OWNER_CONFLICT" {
+                        "Inspect Ubuntu interface, rules and DNS; do not remove unidentified resources"
+                    } else if code == "WSL_WG_HANDSHAKE_UNVERIFIED" {
+                        "Check native Windows endpoint, current WSL adapter/guest IP and peer identity; Ubuntu NAT restored"
+                    } else if code == "WSL_TUN_ROLLBACK_UNCONFIRMED" {
+                        "Inspect Windows sing-box task and Ubuntu routes before attempting any further change"
                     } else { "internet help" }}),
                 json_mode,
             );
@@ -570,7 +590,10 @@ fn menu_status() {
         tun_runtime_label(&task, saved.as_ref(), native.as_ref())
     );
     println!("Windows egress: NOT TESTED (use Diagnose)");
-    println!("WSL:           proxy-only / {}", route(Target::Wsl));
+    println!(
+        "WSL:           native TUN status via WSL menu / {}",
+        route(Target::Wsl)
+    );
     println!("WSL channel:   NOT TESTED (WSL menu -> Diagnose)");
     println!("VM target:     {vm} (egress NOT TESTED)");
     if matches!(saved.as_ref(), Some(s) if s.managed_tun && !s.selected_apps) {
@@ -604,18 +627,39 @@ fn menu_route(target: Target) -> Option<Vec<String>> {
 }
 fn menu_wsl() -> Option<Vec<String>> {
     println!();
-    println!("=== WSL / UBUNTU (EXPLICIT PROXY) ===");
-    println!("Windows proxy: authenticated HTTP, port 2081");
-    println!("Only Ubuntu clients configured for this proxy use the WSL route.");
-    println!("Unconfigured Ubuntu clients retain normal direct internet.");
-    println!("1. Choose WSL DIRECT / WARP route");
-    println!("2. Diagnose WSL -> Windows proxy -> HTTPS egress");
-    println!("3. Rebind WSL listener (only if stale; requires stopped sing-box)");
+    println!("=== WSL / UBUNTU ===");
+    let state = wsl_tun_runtime::status();
+    let tun = state
+        .as_ref()
+        .ok()
+        .and_then(|s| s["state"].as_str())
+        .unwrap_or("UNKNOWN");
+    let wsl_route = config::read(&config::installed())
+        .ok()
+        .and_then(|c| config::selected(&c, Target::Wsl).ok())
+        .map(|r| r.tag().to_owned())
+        .unwrap_or_else(|| "UNKNOWN".to_owned());
+    println!("Network: WSL2 NAT | TUN: {tun} | Route: {wsl_route}");
+    println!("Public IP: NOT TESTED (option 4) | VM target: 64.176.74.102");
+    if let Err(code) = state {
+        println!("WSL readback: {code}");
+    }
+    println!("1. WSL native TUN ON");
+    println!("2. WSL native TUN OFF");
+    println!("3. Choose WSL DIRECT / WARP route");
+    println!("4. Test WSL internet via native WireGuard");
+    println!("5. Diagnose native WSL TUN state");
+    println!("6. Diagnose legacy explicit WSL proxy");
+    println!("7. Rebind WSL proxy listener (requires stopped sing-box)");
     println!("0. Back");
     match read_choice("WSL action: ")?.as_str() {
-        "1" => menu_route(Target::Wsl),
-        "2" => Some(vec!["diagnose".into(), "windows/wsl-selector".into()]),
-        "3" => Some(vec!["wsl".into(), "sync".into()]),
+        "1" => Some(vec!["wsl".into(), "tun".into(), "on".into()]),
+        "2" => Some(vec!["wsl".into(), "tun".into(), "off".into()]),
+        "3" => menu_route(Target::Wsl),
+        "4" => Some(vec!["wsl".into(), "tun".into(), "diagnose".into()]),
+        "5" => Some(vec!["wsl".into(), "tun".into(), "status".into()]),
+        "6" => Some(vec!["diagnose".into(), "windows/wsl-selector".into()]),
+        "7" => Some(vec!["wsl".into(), "sync".into()]),
         "0" => Some(vec![]),
         _ => Some(vec!["invalid".into()]),
     }
@@ -758,7 +802,7 @@ fn menu() -> i32 {
         println!("  1. Windows internet mode");
         println!("  2. Manage applications");
         println!("  3. Windows route DIRECT / WARP");
-        println!("  4. WSL route / diagnose / sync");
+        println!("  4. WSL native TUN / route / diagnose");
         println!("  5. Start / Stop / Restart");
         println!("  6. Proxy settings and tests");
         println!("  7. Status (local native readback)");
