@@ -208,11 +208,11 @@ pub fn firewall_allow(_: &Network) -> Result<(), &'static str> {
     Err("WINDOWS_ONLY")
 }
 
-// Scoped rollback data is intentionally transient in the same Rust invocation.
-// Only addresses are captured; no firewall export or second state store.
+// Rollback snapshot is transient and belongs only to this Rust invocation.
+// Include the native firewall interface binding: WSL NAT may recreate the adapter.
 #[cfg(windows)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WireGuardFirewallBefore(pub Option<(Ipv4Addr, Ipv4Addr)>);
+pub struct WireGuardFirewallBefore(pub Option<(Ipv4Addr, Ipv4Addr, String)>);
 
 #[cfg(windows)]
 fn valid_wg_interface(interface: &str) -> bool {
@@ -222,6 +222,20 @@ fn valid_wg_interface(interface: &str) -> bool {
         && interface
             .bytes()
             .all(|c| (c.is_ascii_graphic() || c == b' ') && c != b'\'')
+}
+
+// Windows Defender stores -InterfaceAlias either as the adapter name or as
+// a GUID. Never pass arbitrary firewall text back into a PowerShell command.
+#[cfg(windows)]
+fn valid_wg_firewall_alias(alias: &str, current_name: &str) -> bool {
+    if alias == current_name {
+        return true;
+    }
+    let parts: Vec<_> = alias.split('-').collect();
+    parts.len() == 5
+        && parts.iter().zip([8, 4, 4, 4, 12]).all(|(part, len)| {
+            part.len() == len && part.bytes().all(|b| b.is_ascii_hexdigit())
+        })
 }
 
 #[cfg(windows)]
@@ -237,6 +251,7 @@ pub fn wireguard_firewall_snapshot(
         r#"
 $ErrorActionPreference='Stop'
 $name='INTERNET-WSL-WG-43913'
+$iface='{interface}'
 $r=Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue
 if (!$r) {{ 'ABSENT'; exit 0 }}
 $p=$r | Get-NetFirewallPortFilter
@@ -244,12 +259,26 @@ $app=$r | Get-NetFirewallApplicationFilter
 $f=$r | Get-NetFirewallInterfaceFilter
 if ($r.DisplayName -cne $name -or $r.Direction -ne 'Inbound' -or
     $r.Action -ne 'Allow' -or $r.Enabled -ne 'True' -or
+    [string]$r.Profile -ne 'Any' -or
     [string]$p.Protocol -ne 'UDP' -or [string]$p.LocalPort -ne '43913' -or
     [string]$p.RemotePort -ne 'Any' -or
-    $app.Program -cne 'C:\internet\sing-box.exe' -or
-    [string]$f.InterfaceAlias -cne '{interface}') {{ throw 'OWNER_CONFLICT' }}
+    $app.Program -cne 'C:\internet\sing-box.exe') {{ throw 'OWNER_CONFLICT' }}
+$alias=[string]$f.InterfaceAlias
+$adapter=Get-NetAdapter -Name $iface -ErrorAction Stop
+$currentGuid=([string]$adapter.InterfaceGuid).Trim('{{}}')
+if ($alias -ine $iface -and $alias -ine $currentGuid) {{
+    # A stale GUID is recoverable only when it does not name any live adapter.
+    if ($alias -notmatch '^[0-9a-fA-F]{{8}}(-[0-9a-fA-F]{{4}}){{3}}-[0-9a-fA-F]{{12}}$') {{
+        throw 'OWNER_CONFLICT'
+    }}
+    $other=@(Get-NetAdapter -IncludeHidden | Where-Object {{
+        ([string]$_.InterfaceGuid).Trim('{{}}') -ieq $alias -or $_.Name -ieq $alias
+    }})
+    if ($other.Count -ne 0) {{ throw 'OWNER_CONFLICT' }}
+}}
 $a=$r | Get-NetFirewallAddressFilter
-'{{0}} {{1}}' -f [string]$a.LocalAddress,[string]$a.RemoteAddress
+@{{local=[string]$a.LocalAddress;remote=[string]$a.RemoteAddress;interface=$alias}} |
+    ConvertTo-Json -Compress
 "#,
         interface = interface
     );
@@ -260,24 +289,31 @@ $a=$r | Get-NetFirewallAddressFilter
     if !out.status.success() {
         return Err("WSL_WG_FIREWALL_OWNER_CONFLICT");
     }
-    let text = std::str::from_utf8(&out.stdout).map_err(|_| "WSL_WG_FIREWALL_SNAPSHOT_FAILED")?;
-    let parts: Vec<_> = text.split_whitespace().collect();
-    if parts == ["ABSENT"] {
+    let text = std::str::from_utf8(&out.stdout)
+        .map_err(|_| "WSL_WG_FIREWALL_SNAPSHOT_FAILED")?
+        .trim();
+    if text == "ABSENT" {
         return Ok(WireGuardFirewallBefore(None));
     }
-    if parts.len() != 2 {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|_| "WSL_WG_FIREWALL_SNAPSHOT_FAILED")?;
+    let local: Ipv4Addr = value["local"]
+        .as_str()
+        .ok_or("WSL_WG_FIREWALL_SNAPSHOT_FAILED")?
+        .parse()
+        .map_err(|_| "WSL_WG_FIREWALL_SNAPSHOT_FAILED")?;
+    let remote: Ipv4Addr = value["remote"]
+        .as_str()
+        .ok_or("WSL_WG_FIREWALL_SNAPSHOT_FAILED")?
+        .parse()
+        .map_err(|_| "WSL_WG_FIREWALL_SNAPSHOT_FAILED")?;
+    let alias = value["interface"]
+        .as_str()
+        .ok_or("WSL_WG_FIREWALL_SNAPSHOT_FAILED")?;
+    if !local.is_private() || !remote.is_private() || !valid_wg_firewall_alias(alias, interface) {
         return Err("WSL_WG_FIREWALL_SNAPSHOT_FAILED");
     }
-    let local = parts[0]
-        .parse::<Ipv4Addr>()
-        .map_err(|_| "WSL_WG_FIREWALL_SNAPSHOT_FAILED")?;
-    let remote = parts[1]
-        .parse::<Ipv4Addr>()
-        .map_err(|_| "WSL_WG_FIREWALL_SNAPSHOT_FAILED")?;
-    if !local.is_private() || !remote.is_private() {
-        return Err("WSL_WG_FIREWALL_SNAPSHOT_FAILED");
-    }
-    Ok(WireGuardFirewallBefore(Some((local, remote))))
+    Ok(WireGuardFirewallBefore(Some((local, remote, alias.to_owned()))))
 }
 
 #[cfg(windows)]
@@ -287,19 +323,21 @@ pub fn wireguard_firewall_restore(
     before: &WireGuardFirewallBefore,
 ) -> Result<(), &'static str> {
     use std::process::Command;
-    // Never overwrite a rule changed by another actor since this invocation.
+    // No blind rollback: reject any concurrent change to the exact rule.
     let current = wireguard_firewall_snapshot(network, interface)?;
-    let intended = WireGuardFirewallBefore(Some((network.gateway, network.guest)));
     if current == *before {
         return Ok(());
     }
-    if current != intended {
+    let Some((local, remote, current_alias)) = current.0.as_ref() else {
+        return Err("WSL_WG_FIREWALL_CONCURRENT_CHANGE");
+    };
+    if *local != network.gateway || *remote != network.guest {
         return Err("WSL_WG_FIREWALL_CONCURRENT_CHANGE");
     }
-    let action = match before.0 {
-        None => "Remove-NetFirewallRule -Name $name -ErrorAction Stop".to_string(),
-        Some((local, remote)) => format!(
-            "$r | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter -LocalAddress '{local}' -RemoteAddress '{remote}' -ErrorAction Stop | Out-Null"
+    let script_action = match &before.0 {
+        None => "Remove-NetFirewallRule -Name $name -ErrorAction Stop".to_owned(),
+        Some((old_local, old_remote, old_alias)) => format!(
+            "$r | Get-NetFirewallInterfaceFilter | Set-NetFirewallInterfaceFilter -InterfaceAlias '{old_alias}' -ErrorAction Stop | Out-Null\n$r | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter -LocalAddress '{old_local}' -RemoteAddress '{old_remote}' -ErrorAction Stop | Out-Null"
         ),
     };
     let script = format!(
@@ -307,8 +345,17 @@ pub fn wireguard_firewall_restore(
 $ErrorActionPreference='Stop'
 $name='INTERNET-WSL-WG-43913'
 $r=Get-NetFirewallRule -Name $name -ErrorAction Stop
-{action}
-"#
+$a=$r | Get-NetFirewallAddressFilter
+$f=$r | Get-NetFirewallInterfaceFilter
+if ([string]$a.LocalAddress -cne '{local}' -or
+    [string]$a.RemoteAddress -cne '{remote}' -or
+    [string]$f.InterfaceAlias -cne '{current_alias}') {{
+    throw 'WSL_WG_FIREWALL_CONCURRENT_CHANGE'
+}}
+{script_action}
+"#,
+        local = network.gateway,
+        remote = network.guest
     );
     let out = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
@@ -323,9 +370,8 @@ $r=Get-NetFirewallRule -Name $name -ErrorAction Stop
 #[cfg(windows)]
 pub fn wireguard_firewall_allow(network: &Network, interface: &str) -> Result<(), &'static str> {
     use std::process::Command;
-    // This is an endpoint-specific Windows Defender rule, not a controller.
-    // One exact guest /32 and one native WSL host adapter; never open the VM,
-    // Ethernet or global UDP scope. The existing Rust CLI is its only writer.
+    // One exact application-owned firewall rule, WSL address pair, UDP port
+    // and current WSL adapter only. Never broaden to Ethernet/VM/Any interface.
     if !valid_wg_interface(interface) {
         return Err("WSL_WG_INTERFACE_INVALID");
     }
@@ -337,6 +383,8 @@ $remote='{guest}'
 $local='{gateway}'
 $iface='{interface}'
 $exe='C:\internet\sing-box.exe'
+$adapter=Get-NetAdapter -Name $iface -ErrorAction Stop
+$currentGuid=([string]$adapter.InterfaceGuid).Trim('{{}}')
 $r=Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue
 if($r){{
   $p=$r | Get-NetFirewallPortFilter
@@ -344,21 +392,37 @@ if($r){{
   $f=$r | Get-NetFirewallInterfaceFilter
   if($r.DisplayName -cne $name -or $r.Direction -ne 'Inbound' -or
      $r.Action -ne 'Allow' -or $r.Enabled -ne 'True' -or
+     [string]$r.Profile -ne 'Any' -or
      [string]$p.Protocol -ne 'UDP' -or [string]$p.LocalPort -ne '43913' -or
-     [string]$p.RemotePort -ne 'Any' -or $app.Program -cne $exe -or
-     [string]$f.InterfaceAlias -cne $iface){{
+     [string]$p.RemotePort -ne 'Any' -or $app.Program -cne $exe){{
      throw 'WSL_WG_FIREWALL_OWNER_CONFLICT'
   }}
-  $a=$r | Get-NetFirewallAddressFilter
-  $a | Set-NetFirewallAddressFilter -LocalAddress $local -RemoteAddress $remote | Out-Null
+  $alias=[string]$f.InterfaceAlias
+  if($alias -ine $iface -and $alias -ine $currentGuid){{
+    if($alias -notmatch '^[0-9a-fA-F]{{8}}(-[0-9a-fA-F]{{4}}){{3}}-[0-9a-fA-F]{{12}}$'){{
+      throw 'WSL_WG_FIREWALL_OWNER_CONFLICT'
+    }}
+    $other=@(Get-NetAdapter -IncludeHidden | Where-Object {{
+      ([string]$_.InterfaceGuid).Trim('{{}}') -ieq $alias -or $_.Name -ieq $alias
+    }})
+    if($other.Count -ne 0){{ throw 'WSL_WG_FIREWALL_OWNER_CONFLICT' }}
+    $f | Set-NetFirewallInterfaceFilter -InterfaceAlias $iface -ErrorAction Stop | Out-Null
+  }}
+  $r | Get-NetFirewallAddressFilter |
+    Set-NetFirewallAddressFilter -LocalAddress $local -RemoteAddress $remote -ErrorAction Stop | Out-Null
 }}else{{
-  New-NetFirewallRule -Name $name -DisplayName $name -Direction Inbound -Action Allow -Enabled True -Program $exe -Protocol UDP -LocalPort 43913 -LocalAddress $local -RemoteAddress $remote -InterfaceAlias $iface -Profile Any | Out-Null
+  New-NetFirewallRule -Name $name -DisplayName $name -Direction Inbound -Action Allow -Enabled True -Program $exe -Protocol UDP -LocalPort 43913 -LocalAddress $local -RemoteAddress $remote -InterfaceAlias $iface -Profile Any -ErrorAction Stop | Out-Null
 }}
 $r=Get-NetFirewallRule -Name $name -ErrorAction Stop
 $a=$r | Get-NetFirewallAddressFilter
 $p=$r | Get-NetFirewallPortFilter
+$f=$r | Get-NetFirewallInterfaceFilter
+$finalAlias=[string]$f.InterfaceAlias
 if([string]$a.RemoteAddress -cne $remote -or [string]$a.LocalAddress -cne $local -or
-   [string]$p.LocalPort -cne '43913'){{ throw 'WSL_WG_FIREWALL_READBACK_FAILED' }}
+   [string]$p.LocalPort -cne '43913' -or
+   ($finalAlias -ine $iface -and $finalAlias -ine $currentGuid)){{
+   throw 'WSL_WG_FIREWALL_READBACK_FAILED'
+}}
 "#,
         guest = network.guest,
         gateway = network.gateway,
