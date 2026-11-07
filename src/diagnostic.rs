@@ -28,8 +28,12 @@ fn is_guest_probe(id: &str) -> bool {
     matches!(id, "windows/wsl-selector" | "windows/wsl-tun")
 }
 fn pending_guest_probe(id: &str) -> Diagnostic {
-    let mut d = Diagnostic::unknown(id, "read-only-guest-probe",
-        "Rust INTERNET / Ubuntu", "Retry targeted diagnose; Ubuntu did not answer before deadline");
+    let mut d = Diagnostic::unknown(
+        id,
+        "read-only-guest-probe",
+        "Rust INTERNET / Ubuntu",
+        "Retry targeted diagnose; Ubuntu did not answer before deadline",
+    );
     d.parent = Some("windows");
     d.reason_code = "GUEST_PROBE_DEADLINE_EXCEEDED";
     d.source = "diagnostic-common-deadline";
@@ -119,13 +123,16 @@ pub fn batch(ids: &[&str], deep: bool) -> Vec<Diagnostic> {
         });
     }
     drop(sender);
-    let mut results: Vec<_> = ids.iter().map(|id| {
-        if is_guest_probe(id) {
-            pending_guest_probe(id)
-        } else {
-            inspect_with_task(id, deep, task.as_ref(), switch_snapshot.as_ref())
-        }
-    }).collect();
+    let mut results: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            if is_guest_probe(id) {
+                pending_guest_probe(id)
+            } else {
+                inspect_with_task(id, deep, task.as_ref(), switch_snapshot.as_ref())
+            }
+        })
+        .collect();
     for _ in 0..pending {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match receiver.recv_timeout(remaining) {
@@ -133,7 +140,7 @@ pub fn batch(ids: &[&str], deep: bool) -> Vec<Diagnostic> {
                 if let Some(slot) = results.iter_mut().find(|d| d.resource_id == id) {
                     *slot = result;
                 }
-            },
+            }
             Err(_) => break, // pending result stays UNKNOWN with no observed_at
         }
     }

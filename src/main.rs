@@ -38,9 +38,13 @@ fn emit(v: &Value, json_mode: bool) {
             );
         }
     } else if v["ip4"].is_string() && v["reason_code"].is_string() {
-        for line in menu_view::wsl_egress_lines(v) { println!("{line}"); }
+        for line in menu_view::wsl_egress_lines(v) {
+            println!("{line}");
+        }
     } else if v["ok"] == true && v["guest"].is_object() && v["state"].is_string() {
-        for line in menu_view::wsl_state_lines(v) { println!("{line}"); }
+        for line in menu_view::wsl_state_lines(v) {
+            println!("{line}");
+        }
     } else if v["ok"] == false {
         println!("ERROR: {}", v["reason_code"].as_str().unwrap_or("UNKNOWN"));
         if let Some(next) = v["next_action"].as_str() {
@@ -873,20 +877,33 @@ fn menu_apps() -> Option<Vec<String>> {
     // One native process inventory per menu entry; reuse it for option 2.
     // Running-process identity is an exact executable path, not a basename.
     let inventory = tun::running_apps();
-    let paths: Vec<String> = inventory.as_ref().ok()
+    let paths: Vec<String> = inventory
+        .as_ref()
+        .ok()
         .and_then(|v| v["paths"].as_array())
-        .into_iter().flatten()
-        .filter_map(|v| v.as_str().map(str::to_owned)).collect();
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
     let mut existing = 0usize;
     let mut missing = 0usize;
     let mut running = 0usize;
-    for (idx,item) in saved.iter().enumerate() {
+    for (idx, item) in saved.iter().enumerate() {
         let path_status = saved_app_path_status(item);
-        if path_status == "EXISTS" { existing += 1; }
-        if path_status == "NOT_FOUND" { missing += 1; }
+        if path_status == "EXISTS" {
+            existing += 1;
+        }
+        if path_status == "NOT_FOUND" {
+            missing += 1;
+        }
         let live = if path_status == "NAME_ONLY" {
             "NAME_ONLY_NOT_VERIFIED"
-        } else if inventory.is_err() || inventory.as_ref().ok().is_some_and(|v|v["truncated"] == true) {
+        } else if inventory.is_err()
+            || inventory
+                .as_ref()
+                .ok()
+                .is_some_and(|v| v["truncated"] == true)
+        {
             "RUNNING_UNKNOWN"
         } else if paths.iter().any(|p| p.eq_ignore_ascii_case(item)) {
             running += 1;
@@ -894,13 +911,26 @@ fn menu_apps() -> Option<Vec<String>> {
         } else {
             "NOT_RUNNING"
         };
-        println!("  {}. {} [{}; {}]",idx+1,item,path_status,live);
+        println!("  {}. {} [{}; {}]", idx + 1, item, path_status, live);
     }
-    println!("Saved: {}; existing paths: {}; missing paths: {}; running exact matches: {}{}",
-        saved.len(), existing, missing, running,
-        if inventory.is_err() { " (inventory unavailable)" }
-        else if inventory.as_ref().ok().is_some_and(|v|v["truncated"] == true) { " (inventory truncated; matches incomplete)" }
-        else { "" });
+    println!(
+        "Saved: {}; existing paths: {}; missing paths: {}; running exact matches: {}{}",
+        saved.len(),
+        existing,
+        missing,
+        running,
+        if inventory.is_err() {
+            " (inventory unavailable)"
+        } else if inventory
+            .as_ref()
+            .ok()
+            .is_some_and(|v| v["truncated"] == true)
+        {
+            " (inventory truncated; matches incomplete)"
+        } else {
+            ""
+        }
+    );
     if saved.is_empty() {
         println!("  No saved applications.");
     }
@@ -910,20 +940,18 @@ fn menu_apps() -> Option<Vec<String>> {
     println!("0. Back (Enter = back)");
     match read_choice("Application source: ")?.as_str() {
         "1" => menu_select_app(&saved),
-        "2" => {
-            match inventory {
-                Ok(v) => {
-                    if v["truncated"] == true {
-                        println!("Inventory limited to first 128 unique executable paths.");
-                    }
-                    menu_select_app(&paths)
+        "2" => match inventory {
+            Ok(v) => {
+                if v["truncated"] == true {
+                    println!("Inventory limited to first 128 unique executable paths.");
                 }
-                Err(code) => {
-                    println!("Windows process inventory unavailable: {code}");
-                    Some(vec![])
-                }
+                menu_select_app(&paths)
             }
-        }
+            Err(code) => {
+                println!("Windows process inventory unavailable: {code}");
+                Some(vec![])
+            }
+        },
         "3" => {
             let path = read_choice("Exact executable path (.exe; 0 = back): ")?;
             if path == "0" || path.is_empty() {
@@ -992,7 +1020,9 @@ fn menu() -> i32 {
         session.command_finished(&args, code);
         // Update only this session's read-only view after WSL mutations.
         // CLI status remains stateless and no probe is triggered by main redraw.
-        if matches!(args.as_slice(), [a,b,c] if a == "wsl" && b == "tun" && (c == "on" || c == "off")) && code == 0 {
+        if matches!(args.as_slice(), [a,b,c] if a == "wsl" && b == "tun" && (c == "on" || c == "off"))
+            && code == 0
+        {
             session.observe_wsl(&wsl_tun_runtime::status());
         }
         if code != 0 {
