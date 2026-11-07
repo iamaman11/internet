@@ -83,18 +83,21 @@ fn menu_uses_one_column_and_explains_full_tun_scope() {
     assert!(first_menu.contains("Windows mode:"));
     assert!(first_menu.contains("Windows egress: NOT TESTED (8 -> 1: real HTTPS)"));
     assert!(first_menu.contains("WSL route:     "));
+    assert!(first_menu.contains("WSL TUN:       NOT CHECKED (4 -> 5: live Ubuntu state)"));
     assert!(first_menu.contains("WSL egress:    NOT TESTED"));
     let normalized = stdout.replace("\r\n", "\n");
     assert!(
-        normalized.contains("1. ALL captured Windows traffic -> VM (DIRECT; control IPs excluded)")
+        normalized
+            .contains("1. ALL Windows TUN-captured traffic -> VM (DIRECT; control IP exclusions)")
     );
     assert!(!normalized.contains("4. Choose DIRECT / WARP route"));
-    assert!(normalized.contains("2. Choose running Windows application"));
+    assert!(normalized.contains("2. Choose an actually running Windows application"));
     assert!(
-        normalized.contains("1. Start managed sing-box (idempotent)\n2. Stop managed sing-box")
+        normalized
+            .contains("1. Start managed sing-box (safe if already running)\n2. Stop sing-box")
     );
-    assert!(normalized.contains("1. Use current Windows selector (DIRECT via VM / WARP)"));
-    assert!(normalized.contains("3. Enter exact EXE path"));
+    assert!(normalized.contains("1. Select for current Windows route (DIRECT VM / WARP)"));
+    assert!(normalized.contains("3. Enter a full EXE path"));
 }
 
 #[test]
@@ -169,13 +172,15 @@ fn wsl_menu_reports_native_tun_without_claiming_unverified_egress() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("=== WSL / UBUNTU ==="));
-    assert!(stdout.contains("Network: WSL2 NAT | TUN: UNKNOWN | Route:"));
-    assert!(stdout.contains("Public IP: NOT TESTED in this view (option 4 runs HTTPS)"));
+    assert!(stdout.contains("Network: UNKNOWN | Native kernel WireGuard: UNKNOWN"));
+    assert!(stdout.contains("Route selected:"));
+    assert!(stdout.contains("Public IPv4: NOT TESTED (option 4 runs a real HTTPS request)"));
     assert!(stdout.contains("1. WSL native TUN ON"));
     assert!(stdout.contains("2. WSL native TUN OFF"));
     assert!(stdout.contains("3. Choose WSL DIRECT / WARP route"));
     assert!(stdout.contains("4. Test WSL IPv4 HTTPS egress via native WireGuard"));
     assert!(stdout.contains("5. Show WSL TUN state (read-only, no HTTPS)"));
-    assert!(stdout.contains("6. Test legacy explicit WSL proxy (not native TUN)"));
+    assert!(!stdout.contains("6. Test legacy explicit WSL proxy (not native TUN)"));
+    assert!(stdout.contains("Legacy explicit proxy diagnostics remain available via the CLI."));
     assert!(!stdout.contains("WSL channel:   HEALTHY"));
 }
