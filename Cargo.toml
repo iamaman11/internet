@@ -1,6 +1,6 @@
 [package]
 name = "internet"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 description = "Single-owner Windows and WSL network CLI"
 license = "MIT"
