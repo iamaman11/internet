@@ -1,4 +1,5 @@
 //! INTERNET is a short-lived CLI. All mutations go through one operation layer.
+mod menu_view;
 use internet::{
     config, diagnostic, lifecycle,
     model::{Health, ROUTES, Route, Target},
@@ -35,6 +36,14 @@ fn emit(v: &Value, json_mode: bool) {
                 item["next_action"].as_str().unwrap_or("-"),
                 item["source"].as_str().unwrap_or("-")
             );
+        }
+    } else if v["ip4"].is_string() && v["reason_code"].is_string() {
+        for line in menu_view::wsl_egress_lines(v) {
+            println!("{line}");
+        }
+    } else if v["ok"] == true && v["guest"].is_object() && v["state"].is_string() {
+        for line in menu_view::wsl_state_lines(v) {
+            println!("{line}");
         }
     } else if v["ok"] == false {
         println!("ERROR: {}", v["reason_code"].as_str().unwrap_or("UNKNOWN"));
@@ -601,7 +610,7 @@ fn tun_runtime_label(
         Err(_) => "UNKNOWN (task unreadable)",
     }
 }
-fn menu_status() {
+fn menu_status(session: &menu_view::Session) {
     let task = lifecycle::is_running();
     let running = match task {
         Ok(true) => "RUNNING",
@@ -647,13 +656,13 @@ fn menu_status() {
         "TUN:           {}",
         tun_runtime_label(&task, saved.as_ref(), native.as_ref())
     );
-    println!("Windows egress: NOT TESTED (8 -> 1: real HTTPS)");
+    println!("Windows egress: {}", session.windows_egress());
     println!(
         "WSL route:     {} (selected, not egress proof)",
         route(Target::Wsl)
     );
-    println!("WSL TUN:       NOT CHECKED (4 -> 5: live Ubuntu state)");
-    println!("WSL egress:    NOT TESTED (8 -> 2: native WG HTTPS)");
+    println!("WSL TUN:       {}", session.wsl_state());
+    println!("WSL egress:    {}", session.wsl_egress());
     println!("VM target:     {vm} (address, not provider-health proof)");
     if matches!(saved.as_ref(), Some(s) if s.managed_tun && !s.selected_apps) {
         println!("ALL mode: individual DIRECT app exclusions unavailable");
@@ -690,10 +699,11 @@ fn menu_route(target: Target) -> Option<Vec<String>> {
     args.push(ROUTES[index - 1].to_owned());
     Some(args)
 }
-fn menu_wsl() -> Option<Vec<String>> {
+fn menu_wsl(session: &mut menu_view::Session) -> Option<Vec<String>> {
     println!();
     println!("=== WSL / UBUNTU ===");
     let state = wsl_tun_runtime::status();
+    session.observe_wsl(&state);
     let tun = state
         .as_ref()
         .ok()
@@ -864,9 +874,63 @@ fn menu_apps() -> Option<Vec<String>> {
             return Some(vec![]);
         }
     };
-    for item in &saved {
-        println!("  Saved: {item} [{}]", saved_app_path_status(item));
+    // One native process inventory per menu entry; reuse it for option 2.
+    // Running-process identity is an exact executable path, not a basename.
+    let inventory = tun::running_apps();
+    let paths: Vec<String> = inventory
+        .as_ref()
+        .ok()
+        .and_then(|v| v["paths"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    let mut existing = 0usize;
+    let mut missing = 0usize;
+    let mut running = 0usize;
+    for (idx, item) in saved.iter().enumerate() {
+        let path_status = saved_app_path_status(item);
+        if path_status == "EXISTS" {
+            existing += 1;
+        }
+        if path_status == "NOT_FOUND" {
+            missing += 1;
+        }
+        let live = if path_status == "NAME_ONLY" {
+            "NAME_ONLY_NOT_VERIFIED"
+        } else if inventory.is_err()
+            || inventory
+                .as_ref()
+                .ok()
+                .is_some_and(|v| v["truncated"] == true)
+        {
+            "RUNNING_UNKNOWN"
+        } else if paths.iter().any(|p| p.eq_ignore_ascii_case(item)) {
+            running += 1;
+            "RUNNING"
+        } else {
+            "NOT_RUNNING"
+        };
+        println!("  {}. {} [{}; {}]", idx + 1, item, path_status, live);
     }
+    println!(
+        "Saved: {}; existing paths: {}; missing paths: {}; running exact matches: {}{}",
+        saved.len(),
+        existing,
+        missing,
+        running,
+        if inventory.is_err() {
+            " (inventory unavailable)"
+        } else if inventory
+            .as_ref()
+            .ok()
+            .is_some_and(|v| v["truncated"] == true)
+        {
+            " (inventory truncated; matches incomplete)"
+        } else {
+            ""
+        }
+    );
     if saved.is_empty() {
         println!("  No saved applications.");
     }
@@ -876,25 +940,18 @@ fn menu_apps() -> Option<Vec<String>> {
     println!("0. Back (Enter = back)");
     match read_choice("Application source: ")?.as_str() {
         "1" => menu_select_app(&saved),
-        "2" => {
-            let inventory = match tun::running_apps() {
-                Ok(value) => value,
-                Err(code) => {
-                    println!("Windows process inventory unavailable: {code}");
-                    return Some(vec![]);
+        "2" => match inventory {
+            Ok(v) => {
+                if v["truncated"] == true {
+                    println!("Inventory limited to first 128 unique executable paths.");
                 }
-            };
-            if inventory["truncated"] == true {
-                println!("Inventory limited to first 128 unique executable paths.");
+                menu_select_app(&paths)
             }
-            let paths = inventory["paths"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect::<Vec<_>>();
-            menu_select_app(&paths)
-        }
+            Err(code) => {
+                println!("Windows process inventory unavailable: {code}");
+                Some(vec![])
+            }
+        },
         "3" => {
             let path = read_choice("Exact executable path (.exe; 0 = back): ")?;
             if path == "0" || path.is_empty() {
@@ -908,8 +965,9 @@ fn menu_apps() -> Option<Vec<String>> {
     }
 }
 fn menu() -> i32 {
+    let mut session = menu_view::Session::default();
     loop {
-        menu_status();
+        menu_status(&session);
         println!();
         println!("  1. Windows internet mode");
         println!("  2. Manage applications");
@@ -932,7 +990,7 @@ fn menu() -> i32 {
             "1" => menu_windows(),
             "2" => menu_apps(),
             "3" => menu_route(Target::Desktop),
-            "4" => menu_wsl(),
+            "4" => menu_wsl(&mut session),
             "5" => {
                 println!("1. Start managed sing-box (safe if already running)");
                 println!("2. Stop sing-box (interrupts TUN and may disconnect MCP)");
@@ -959,6 +1017,14 @@ fn menu() -> i32 {
             continue;
         }
         let code = execute(&args, false);
+        session.command_finished(&args, code);
+        // Update only this session's read-only view after WSL mutations.
+        // CLI status remains stateless and no probe is triggered by main redraw.
+        if matches!(args.as_slice(), [a,b,c] if a == "wsl" && b == "tun" && (c == "on" || c == "off"))
+            && code == 0
+        {
+            session.observe_wsl(&wsl_tun_runtime::status());
+        }
         if code != 0 {
             println!("Operation exit={code}; no success assumed.");
         }
