@@ -659,7 +659,7 @@ fn menu_status() {
 fn menu_route(target: Target) -> Option<Vec<String>> {
     println!();
     println!("Choose route (0 or Enter = back):");
-    println!("DIRECT -> VM egress (64.176.74.102 is only the configured target):");
+    println!("DIRECT -> configured VM egress (verify actual IP using Diagnose):");
     for (i, route) in ROUTES[..3].iter().enumerate() {
         println!("  {}. {}", i + 1, route);
     }
