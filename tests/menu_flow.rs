@@ -87,12 +87,14 @@ fn menu_uses_one_column_and_explains_full_tun_scope() {
     assert!(first_menu.contains("WSL egress:    NOT TESTED"));
     let normalized = stdout.replace("\r\n", "\n");
     assert!(
-        normalized.contains("1. ALL Windows TUN-captured traffic -> VM (DIRECT; control IP exclusions)")
+        normalized
+            .contains("1. ALL Windows TUN-captured traffic -> VM (DIRECT; control IP exclusions)")
     );
     assert!(!normalized.contains("4. Choose DIRECT / WARP route"));
     assert!(normalized.contains("2. Choose an actually running Windows application"));
     assert!(
-        normalized.contains("1. Start managed sing-box (safe if already running)\n2. Stop sing-box")
+        normalized
+            .contains("1. Start managed sing-box (safe if already running)\n2. Stop sing-box")
     );
     assert!(normalized.contains("1. Select for current Windows route (DIRECT VM / WARP)"));
     assert!(normalized.contains("3. Enter a full EXE path"));
