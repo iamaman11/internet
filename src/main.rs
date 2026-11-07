@@ -648,7 +648,10 @@ fn menu_status() {
         tun_runtime_label(&task, saved.as_ref(), native.as_ref())
     );
     println!("Windows egress: NOT TESTED (8 -> 1: real HTTPS)");
-    println!("WSL route:     {} (selected, not egress proof)", route(Target::Wsl));
+    println!(
+        "WSL route:     {} (selected, not egress proof)",
+        route(Target::Wsl)
+    );
     println!("WSL TUN:       NOT CHECKED (4 -> 5: live Ubuntu state)");
     println!("WSL egress:    NOT TESTED (8 -> 2: native WG HTTPS)");
     println!("VM target:     {vm} (address, not provider-health proof)");
@@ -701,7 +704,11 @@ fn menu_wsl() -> Option<Vec<String>> {
         .and_then(|c| config::selected(&c, Target::Wsl).ok())
         .map(|r| r.tag().to_owned())
         .unwrap_or_else(|| "UNKNOWN".to_owned());
-    let network = state.as_ref().ok().and_then(|s| s["network"].as_str()).unwrap_or("UNKNOWN");
+    let network = state
+        .as_ref()
+        .ok()
+        .and_then(|s| s["network"].as_str())
+        .unwrap_or("UNKNOWN");
     println!("Network: {network} | Native kernel WireGuard: {tun}");
     println!("Route selected: {wsl_route} (effective only when WSL TUN is ON)");
     println!("Public IPv4: NOT TESTED (option 4 runs a real HTTPS request)");
