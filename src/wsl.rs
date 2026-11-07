@@ -233,9 +233,10 @@ fn valid_wg_firewall_alias(alias: &str, current_name: &str) -> bool {
     }
     let parts: Vec<_> = alias.split('-').collect();
     parts.len() == 5
-        && parts.iter().zip([8, 4, 4, 4, 12]).all(|(part, len)| {
-            part.len() == len && part.bytes().all(|b| b.is_ascii_hexdigit())
-        })
+        && parts
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(part, len)| part.len() == len && part.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 #[cfg(windows)]
@@ -313,7 +314,11 @@ $a=$r | Get-NetFirewallAddressFilter
     if !local.is_private() || !remote.is_private() || !valid_wg_firewall_alias(alias, interface) {
         return Err("WSL_WG_FIREWALL_SNAPSHOT_FAILED");
     }
-    Ok(WireGuardFirewallBefore(Some((local, remote, alias.to_owned()))))
+    Ok(WireGuardFirewallBefore(Some((
+        local,
+        remote,
+        alias.to_owned(),
+    ))))
 }
 
 #[cfg(windows)]
