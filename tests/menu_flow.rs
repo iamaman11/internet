@@ -81,7 +81,9 @@ fn menu_uses_one_column_and_explains_full_tun_scope() {
     assert!(!first_menu.contains("Add application"));
     assert!(!first_menu.contains("Remove application"));
     assert!(first_menu.contains("Windows mode:"));
-    assert!(first_menu.contains("Windows egress: NOT TESTED (8 -> 1: desktop HTTPS; not each app)"));
+    assert!(
+        first_menu.contains("Windows egress: NOT TESTED (8 -> 1: desktop HTTPS; not each app)")
+    );
     assert!(first_menu.contains("WSL route:     "));
     assert!(first_menu.contains("WSL TUN:       NOT CHECKED (4 -> 5: Ubuntu readback)"));
     assert!(first_menu.contains("WSL egress:    NOT TESTED"));
