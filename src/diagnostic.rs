@@ -24,6 +24,17 @@ pub const IDS: [&str; 13] = [
     "vultr/line1",
     "vultr/line2",
 ];
+fn is_guest_probe(id: &str) -> bool {
+    matches!(id, "windows/wsl-selector" | "windows/wsl-tun")
+}
+fn pending_guest_probe(id: &str) -> Diagnostic {
+    let mut d = Diagnostic::unknown(id, "read-only-guest-probe",
+        "Rust INTERNET / Ubuntu", "Retry targeted diagnose; Ubuntu did not answer before deadline");
+    d.parent = Some("windows");
+    d.reason_code = "GUEST_PROBE_DEADLINE_EXCEEDED";
+    d.source = "diagnostic-common-deadline";
+    d
+}
 fn now() -> Option<String> {
     Some(Utc::now().to_rfc3339())
 }
@@ -92,10 +103,40 @@ pub fn batch(ids: &[&str], deep: bool) -> Vec<Diagnostic> {
     } else {
         None
     };
-    let mut results: Vec<_> = ids
-        .iter()
-        .map(|id| inspect_with_task(id, deep, task.as_ref(), switch_snapshot.as_ref()))
-        .collect();
+    // Ubuntu readback can block on an unresponsive wsl.exe. Run only these
+    // read-only checks concurrently with the other probes; bound the wait by
+    // the same deadline. A timed-out probe is UNKNOWN, never healthy.
+    let (sender, receiver) = std::sync::mpsc::channel::<(String, Diagnostic)>();
+    let mut pending = 0usize;
+    for id in ids.iter().copied().filter(|id| is_guest_probe(id)) {
+        let tx = sender.clone();
+        let task_copy = task;
+        let id_owned = id.to_owned();
+        pending += 1;
+        std::thread::spawn(move || {
+            let d = inspect_with_task(&id_owned, true, task_copy.as_ref(), None);
+            let _ = tx.send((id_owned, d));
+        });
+    }
+    drop(sender);
+    let mut results: Vec<_> = ids.iter().map(|id| {
+        if is_guest_probe(id) {
+            pending_guest_probe(id)
+        } else {
+            inspect_with_task(id, deep, task.as_ref(), switch_snapshot.as_ref())
+        }
+    }).collect();
+    for _ in 0..pending {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(remaining) {
+            Ok((id, result)) => {
+                if let Some(slot) = results.iter_mut().find(|d| d.resource_id == id) {
+                    *slot = result;
+                }
+            },
+            Err(_) => break, // pending result stays UNKNOWN with no observed_at
+        }
+    }
     // Guest-originating authenticated HTTPS is only attempted after the
     // existing WSL boundary check proved selector ownership, binding and 407.
     // No secrets in argv, logs or stored state; read runtime sing-box JSON.
@@ -941,6 +982,18 @@ mod tests {
                 assert!(ids.contains(dep), "unknown dependency {dep} of {id}");
             }
         }
+    }
+    #[test]
+    fn overdue_guest_probe_never_invents_health_or_timestamp() {
+        for id in ["windows/wsl-selector", "windows/wsl-tun"] {
+            assert!(is_guest_probe(id));
+            let d = pending_guest_probe(id);
+            assert_eq!(d.health, Health::Unknown);
+            assert_eq!(d.reason_code, "GUEST_PROBE_DEADLINE_EXCEEDED");
+            assert!(d.observed_at.is_none());
+            assert_eq!(d.parent, Some("windows"));
+        }
+        assert!(!is_guest_probe("windows/tun"));
     }
     #[test]
     fn remote_not_checked_is_not_fabricated() {
