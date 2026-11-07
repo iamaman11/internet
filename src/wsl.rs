@@ -539,6 +539,34 @@ mod tests {
             );
         }
     }
+    #[cfg(windows)]
+    #[test]
+    fn firewall_alias_allows_only_native_name_or_guid() {
+        let name = "vEthernet (WSL (Hyper-V firewall))";
+        assert!(valid_wg_interface(name));
+        assert!(valid_wg_firewall_alias(name, name));
+        assert!(valid_wg_firewall_alias(
+            "6375b8d1-f302-4970-b266-38425294c522",
+            name
+        ));
+        assert!(valid_wg_firewall_alias(
+            "B5DB4AF3-B715-48FA-814A-40B3F8BAE2BB",
+            name
+        ));
+        for foreign in [
+            "Ethernet",
+            "Any",
+            "*",
+            "",
+            "6375b8d1-f302-4970-b266-38425294c522';Remove-NetFirewallRule",
+            "not-a-guid",
+        ] {
+            assert!(!valid_wg_firewall_alias(foreign, name));
+        }
+        assert!(!valid_wg_interface("Ethernet"));
+        assert!(!valid_wg_interface("vEthernet (WSL'); #)"));
+    }
+
     #[test]
     fn exact_private_wsl_scope() {
         assert_eq!(
