@@ -458,6 +458,12 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
                         "WSL NAT address changed; use guarded native WSL endpoint reconfiguration"
                     } else if code == "WSL_TUN_GUEST_OWNER_CONFLICT" {
                         "Inspect Ubuntu interface, rules and DNS; do not remove unidentified resources"
+                    } else if code == "WSL_WG_FIREWALL_OWNER_CONFLICT" {
+                        "INTERNET-WSL-WG-43913: rule identity or WSL interface ownership conflicts. Check exact rule and current vEthernet (WSL) adapter; no broad firewall change"
+                    } else if code == "WSL_WG_FIREWALL_APPLY_UNCONFIRMED" {
+                        "INTERNET-WSL-WG-43913: native interface rebinding/readback failed; inspect exact rule and Ubuntu state before retrying"
+                    } else if code == "WSL_WG_FIREWALL_ROLLBACK_UNCONFIRMED" {
+                        "INTERNET-WSL-WG-43913: firewall rollback not verified; inspect exact owned rule and WSL TUN before another change"
                     } else if code == "WSL_WG_HANDSHAKE_UNVERIFIED" {
                         "Check native Windows endpoint, current WSL adapter/guest IP and peer identity; Ubuntu NAT restored"
                     } else if code == "WSL_TUN_ROLLBACK_UNCONFIRMED" {
@@ -642,7 +648,8 @@ fn menu_status() {
         tun_runtime_label(&task, saved.as_ref(), native.as_ref())
     );
     println!("Windows egress: NOT TESTED (8 -> 1: real HTTPS)");
-    println!("WSL route:     {} (native TUN: 4 -> 5)", route(Target::Wsl));
+    println!("WSL route:     {} (selected, not egress proof)", route(Target::Wsl));
+    println!("WSL TUN:       NOT CHECKED (4 -> 5: live Ubuntu state)");
     println!("WSL egress:    NOT TESTED (8 -> 2: native WG HTTPS)");
     println!("VM target:     {vm} (address, not provider-health proof)");
     if matches!(saved.as_ref(), Some(s) if s.managed_tun && !s.selected_apps) {
@@ -652,10 +659,15 @@ fn menu_status() {
 fn menu_route(target: Target) -> Option<Vec<String>> {
     println!();
     println!("Choose route (0 or Enter = back):");
-    println!("DIRECT = VM; WARP = separate egress; Auto = fallback within the selected line.");
-    for (i, route) in ROUTES.iter().enumerate() {
+    println!("DIRECT -> VM egress (64.176.74.102 is only the configured target):");
+    for (i, route) in ROUTES[..3].iter().enumerate() {
         println!("  {}. {}", i + 1, route);
     }
+    println!("WARP -> independent egress (not VM public IP):");
+    for (i, route) in ROUTES[3..].iter().enumerate() {
+        println!("  {}. {}", i + 4, route);
+    }
+    println!("Auto = transport fallback within the selected line; does not switch DIRECT/WARP.");
     let value = read_choice("Route number: ")?;
     let index = match value.as_str() {
         "0" | "" => return Some(vec![]),
@@ -689,8 +701,13 @@ fn menu_wsl() -> Option<Vec<String>> {
         .and_then(|c| config::selected(&c, Target::Wsl).ok())
         .map(|r| r.tag().to_owned())
         .unwrap_or_else(|| "UNKNOWN".to_owned());
-    println!("Network: WSL2 NAT | TUN: {tun} | Route: {wsl_route}");
-    println!("Public IP: NOT TESTED in this view (option 4 runs HTTPS)");
+    let network = state.as_ref().ok().and_then(|s| s["network"].as_str()).unwrap_or("UNKNOWN");
+    println!("Network: {network} | Native kernel WireGuard: {tun}");
+    println!("Route selected: {wsl_route} (effective only when WSL TUN is ON)");
+    println!("Public IPv4: NOT TESTED (option 4 runs a real HTTPS request)");
+    if tun == "OFF" {
+        println!("Ubuntu uses its ordinary NAT route while this tunnel is OFF.");
+    }
     if let Err(code) = state {
         println!("WSL readback: {code}");
     }
@@ -699,8 +716,7 @@ fn menu_wsl() -> Option<Vec<String>> {
     println!("3. Choose WSL DIRECT / WARP route");
     println!("4. Test WSL IPv4 HTTPS egress via native WireGuard");
     println!("5. Show WSL TUN state (read-only, no HTTPS)");
-    println!("6. Test legacy explicit WSL proxy (not native TUN)");
-    println!("7. Rebind legacy WSL proxy listener (requires stopped sing-box)");
+    println!("Legacy explicit proxy diagnostics remain available via the CLI.");
     println!("0. Back (Enter = back)");
     match read_choice("WSL action: ")?.as_str() {
         "1" => Some(vec!["wsl".into(), "tun".into(), "on".into()]),
@@ -708,8 +724,6 @@ fn menu_wsl() -> Option<Vec<String>> {
         "3" => menu_route(Target::Wsl),
         "4" => Some(vec!["wsl".into(), "tun".into(), "diagnose".into()]),
         "5" => Some(vec!["wsl".into(), "tun".into(), "status".into()]),
-        "6" => Some(vec!["diagnose".into(), "windows/wsl-selector".into()]),
-        "7" => Some(vec!["wsl".into(), "sync".into()]),
         "0" | "" => Some(vec![]),
         _ => Some(vec!["invalid".into()]),
     }
@@ -726,11 +740,11 @@ fn menu_windows() -> Option<Vec<String>> {
     println!("=== WINDOWS INTERNET MODE ===");
     println!("Active TUN: ALL / SELECTED uses native rule reload; no sing-box restart.");
     println!("NORMAL needs a safe control path before stopping the existing TUN.");
-    println!("Current (saved): {}", windows_mode_label(state.as_ref()));
-    println!("Windows route: {current}; selected apps: {count}");
-    println!("1. ALL captured Windows traffic -> VM (DIRECT; control IPs excluded)");
+    println!("Saved mode: {}", windows_mode_label(state.as_ref()));
+    println!("Selected Windows route: {current}; saved applications: {count}");
+    println!("1. ALL Windows TUN-captured traffic -> VM (DIRECT; control IP exclusions)");
     println!("2. SELECTED applications ({count}) -> current Windows route");
-    println!("3. NORMAL Windows network (TUN OFF; explicit proxies remain)");
+    println!("3. NORMAL Windows internet (TUN OFF; explicit proxies still available)");
     println!("0. Back (Enter = back; route in main menu item 3)");
     match read_choice("Mode: ")?.as_str() {
         "1" => Some(vec!["windows-mode".into(), "all".into()]),
@@ -778,9 +792,16 @@ fn menu_diagnose() -> Option<Vec<String>> {
 fn menu_app_action(exe: &str) -> Option<Vec<String>> {
     println!();
     println!("Application: {exe}");
-    println!("1. Use current Windows selector (DIRECT via VM / WARP)");
-    println!("2. Normal route (remove selection; unavailable in ALL mode)");
-    println!("3. Inspect application route");
+    let selected_route = config::read(&config::installed())
+        .ok()
+        .and_then(|c| config::selected(&c, Target::Desktop).ok())
+        .map(|r| r.tag().to_owned())
+        .unwrap_or_else(|| "UNKNOWN".into());
+    println!("Current Windows selector: {selected_route}");
+    println!("External IP of this application: NOT TESTED");
+    println!("1. Select for current Windows route (DIRECT VM / WARP)");
+    println!("2. Remove from selected apps (native DIRECT, not TUN kernel bypass)");
+    println!("3. Inspect saved rule and native state");
     println!("0. Back (Enter = back)");
     match read_choice("Application action: ")?.as_str() {
         "1" => Some(vec!["app".into(), exe.into(), "vm".into()]),
@@ -827,7 +848,8 @@ fn menu_apps() -> Option<Vec<String>> {
     println!();
     println!("=== MANAGED APPLICATIONS ===");
     println!("Saved entries are retained in every Windows mode.");
-    println!("Only SELECTED mode applies per-app current-selector/direct routes.");
+    println!("Per-app choices affect traffic only in SELECTED mode.");
+    println!("An EXE path exists does not prove that the app is running or its external IP.");
     let saved = match tun::read_at(&tun::path()) {
         Ok(value) => value.applications,
         Err(code) => {
@@ -841,9 +863,9 @@ fn menu_apps() -> Option<Vec<String>> {
     if saved.is_empty() {
         println!("  No saved applications.");
     }
-    println!("1. Choose saved application");
-    println!("2. Choose running Windows application");
-    println!("3. Enter exact EXE path");
+    println!("1. Choose a saved application");
+    println!("2. Choose an actually running Windows application");
+    println!("3. Enter a full EXE path");
     println!("0. Back (Enter = back)");
     match read_choice("Application source: ")?.as_str() {
         "1" => menu_select_app(&saved),
@@ -905,9 +927,9 @@ fn menu() -> i32 {
             "3" => menu_route(Target::Desktop),
             "4" => menu_wsl(),
             "5" => {
-                println!("1. Start managed sing-box (idempotent)");
-                println!("2. Stop managed sing-box (can interrupt TUN and MCP)");
-                println!("3. Restart managed sing-box (can interrupt TUN and MCP)");
+                println!("1. Start managed sing-box (safe if already running)");
+                println!("2. Stop sing-box (interrupts TUN and may disconnect MCP)");
+                println!("3. Restart sing-box (interrupts connections and may disconnect MCP)");
                 println!("0. Back (Enter = back)");
                 read_choice("Action: ").map(|v| match v.as_str() {
                     "1" => vec!["start".into()],
