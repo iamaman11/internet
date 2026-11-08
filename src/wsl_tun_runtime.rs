@@ -583,7 +583,7 @@ mod no_windows_mutation_tests {
                 "WSL ON must never alter Windows: {forbidden}"
             );
         }
-        let off_body = &source[end..source.find("#[cfg(windows)]\npub use native::").unwrap()];
+        let off_body = &source[end..source.find("pub use native::{").unwrap()];
         for forbidden in [
             "lifecycle::",
             "config::write_checked(",
