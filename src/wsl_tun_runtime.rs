@@ -4,6 +4,25 @@ use serde_json::Value;
 #[cfg(windows)]
 use serde_json::json;
 
+// A live, correctly addressed listener may use the legacy NIC-bound JSON;
+// the next normal Windows start removes that obsolete binding offline.
+#[cfg(any(windows, test))]
+fn endpoint_needs_update(
+    configured: bool,
+    endpoint: &Value,
+    guest_ip: &str,
+    guest_public_key: &str,
+    windows_private_key: &str,
+) -> bool {
+    !configured
+        || endpoint["listen_port"].as_u64()
+            != Some(u64::from(crate::wsl_tun::WINDOWS_WG_LISTEN_PORT))
+        || endpoint["peers"][0]["address"].as_str() != Some(guest_ip)
+        || endpoint["peers"][0]["public_key"].as_str() != Some(guest_public_key)
+        || endpoint["private_key"].as_str() != Some(windows_private_key)
+        || endpoint.get("detour").is_some()
+}
+
 #[cfg(windows)]
 mod native {
     use super::*;
@@ -406,18 +425,16 @@ mod native {
         let windows_private = windows_private()?;
         let windows_pub = windows_public(&windows_private)?;
         let ip = network.guest.to_string();
-        let peer = &old["endpoints"][0]["peers"][0];
-        // Migrating the previous adapter-bound endpoint is a one-time
-        // explicit change, not a hidden restart of Windows/MCP.
-        let legacy_interface_bind = old["endpoints"][0].get("bind_interface").is_some()
-            || old["endpoints"][0].get("detour").is_some();
-        let needs_update = !configured
-            || old["endpoints"][0]["listen_port"].as_u64()
-                != Some(u64::from(wsl_tun::WINDOWS_WG_LISTEN_PORT))
-            || peer["address"].as_str() != Some(ip.as_str())
-            || peer["public_key"].as_str() != Some(guest_pub.as_str())
-            || old["endpoints"][0]["private_key"].as_str() != Some(windows_private.as_str())
-            || legacy_interface_bind;
+        // Preserve the working Windows TUN/MCP link: a legacy NIC binding
+        // alone does not require a live restart when UDP 43913 is listening.
+        // A stale peer or an old detour endpoint still requires reconfiguration.
+        let needs_update = super::endpoint_needs_update(
+            configured,
+            &old["endpoints"][0],
+            &ip,
+            &guest_pub,
+            &windows_private,
+        );
         if !running && !needs_update {
             return Err("WSL_TUN_WINDOWS_NOT_RUNNING");
         }
@@ -599,6 +616,40 @@ pub fn off() -> Result<Value, &'static str> {
 #[cfg(not(windows))]
 pub fn on_allow_mcp_reconnect() -> Result<Value, &'static str> {
     Err("WINDOWS_ONLY")
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn live_legacy_binding_alone_never_forces_windows_restart() {
+        let endpoint = json!({
+            "listen_port": crate::wsl_tun::WINDOWS_WG_LISTEN_PORT,
+            "bind_interface": "vEthernet (WSL (Hyper-V firewall))",
+            "private_key": "windows-test-key",
+            "peers": [{"address": "172.26.23.199", "public_key": "guest-test-key"}]
+        });
+        assert!(!endpoint_needs_update(
+            true, &endpoint, "172.26.23.199", "guest-test-key", "windows-test-key"
+        ));
+        assert!(endpoint_needs_update(
+            true, &endpoint, "172.26.23.200", "guest-test-key", "windows-test-key"
+        ));
+        assert!(endpoint_needs_update(
+            true, &endpoint, "172.26.23.199", "other-key", "windows-test-key"
+        ));
+        assert!(endpoint_needs_update(
+            false, &endpoint, "172.26.23.199", "guest-test-key", "windows-test-key"
+        ));
+        let mut old_detour = endpoint.clone();
+        old_detour.as_object_mut().unwrap().remove("listen_port");
+        old_detour["detour"] = json!("wsl-transport-direct");
+        assert!(endpoint_needs_update(
+            true, &old_detour, "172.26.23.199", "guest-test-key", "windows-test-key"
+        ));
+    }
 }
 
 #[cfg(all(test, not(windows)))]

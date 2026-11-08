@@ -223,6 +223,28 @@ pub fn render(original: &Value, opts: &Options<'_>) -> Result<Value, &'static st
     Ok(next)
 }
 
+/// Called only while the native Windows task is stopped. The optional
+/// WireGuard listener must not depend on a WSL adapter that starts later.
+/// The existing firewall still restricts UDP ingress to the owned WSL NIC.
+pub fn unbind_at_windows_start(current: &Value) -> Result<Value, &'static str> {
+    let (_, layer) = split(current)?;
+    let Some(layer) = layer else {
+        return Ok(current.clone());
+    };
+    if layer.endpoint.get("listen_port").is_none()
+        || layer.endpoint.get("bind_interface").is_none()
+    {
+        return Ok(current.clone());
+    }
+    let mut next = current.clone();
+    next["endpoints"][0]
+        .as_object_mut()
+        .ok_or("WSL_WG_ENDPOINT_UNOWNED")?
+        .remove("bind_interface");
+    split(&next)?;
+    Ok(next)
+}
+
 pub fn remove(original: &Value) -> Result<Value, &'static str> {
     crate::config::validate(original)?;
     let (base, _) = split(original)?;
@@ -266,6 +288,12 @@ mod tests {
         let base = json!({"outbounds":[{"type":"direct","tag":"main"}],
             "route":{"rules":[]}});
         let candidate = attach(&base, Some(&modern)).unwrap();
+        let unbound = unbind_at_windows_start(&candidate).unwrap();
+        assert!(unbound["endpoints"][0].get("bind_interface").is_none());
+        assert_eq!(unbound["endpoints"][0]["listen_port"], WINDOWS_WG_LISTEN_PORT);
+        assert_eq!(unbound["endpoints"][0]["peers"], candidate["endpoints"][0]["peers"]);
+        assert_eq!(unbind_at_windows_start(&unbound).unwrap(), unbound);
+        assert_eq!(unbind_at_windows_start(&base).unwrap(), base);
         let (restored, layer) = split(&candidate).unwrap();
         assert_eq!(restored, base);
         assert!(layer.unwrap().outbound.is_none());

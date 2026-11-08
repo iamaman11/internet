@@ -481,6 +481,12 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
                         "UDP listener was ready; inspect WSL WireGuard peer and exact Windows Firewall scope; Ubuntu NAT restored"
                     } else if code == "WSL_TUN_ROLLBACK_UNCONFIRMED" {
                         "Inspect Windows sing-box task and Ubuntu routes before attempting any further change"
+                    } else if code == "TASK_PROCESS_NOT_RUNNING" {
+                        "INTERNET-SingBox: Task Scheduler did not report a running owned process after start; inspect exact task and native sing-box process"
+                    } else if code == "SING_BOX_API_UNREACHABLE" || code == "SING_BOX_API_DEADLINE_EXCEEDED" {
+                        "INTERNET-SingBox is running but the Desktop selector API is not ready; inspect native 127.0.0.1:9090 before changing Windows or WSL routes"
+                    } else if code == "SING_BOX_SELECTOR_READBACK_INVALID" {
+                        "INTERNET-SingBox Desktop selector responded without a valid selected route; inspect the owned sing-box config and Clash API"
                     } else if code == "TASK_RESTART_RECOVERED" {
                         "Original Windows sing-box config restarted healthy after initial failure; verify Windows TUN, MCP and real HTTPS egress"
                     } else if code == "TASK_RESTART_RECOVERY_UNCONFIRMED" {

@@ -77,6 +77,10 @@ pub fn windows_start_config(
     current: &serde_json::Value,
 ) -> Result<serde_json::Value, &'static str> {
     use std::io::ErrorKind;
+    // An installed WG endpoint is optional to Windows startup. Remove the
+    // stale WSL-NIC bind only while sing-box is stopped; WSL ON never restarts
+    // the healthy Windows runtime merely to migrate this legacy field.
+    let current = crate::wsl_tun::unbind_at_windows_start(current)?;
     let address: Ipv4Addr = current
         .pointer("/inbounds/1/listen")
         .and_then(|v| v.as_str())
@@ -84,15 +88,15 @@ pub fn windows_start_config(
         .parse()
         .map_err(|_| "WSL_LISTENER_INVALID")?;
     if address.is_loopback() {
-        return Ok(current.clone());
+        return Ok(current);
     }
     match std::net::TcpListener::bind((address, 0)) {
         Ok(socket) => {
             drop(socket);
-            Ok(current.clone())
+            Ok(current)
         }
         Err(e) if e.kind() == ErrorKind::AddrNotAvailable => {
-            crate::config::with_wsl_loopback(current)
+            crate::config::with_wsl_loopback(&current)
         }
         Err(_) => Err("WSL_LISTENER_NATIVE_CHECK_FAILED"),
     }

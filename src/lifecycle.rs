@@ -12,6 +12,20 @@ fn task_state_running(state: i32) -> Result<bool, &'static str> {
     }
 }
 
+/// Windows startup requires only the native managed task and the Desktop
+/// selector. WSL selector health is diagnosed independently, never a
+/// prerequisite for a usable Windows TUN or MCP connection.
+#[cfg(any(windows, test))]
+fn windows_start_gate(
+    task_running: bool,
+    desktop_selector: Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    if !task_running {
+        return Err("TASK_PROCESS_NOT_RUNNING");
+    }
+    desktop_selector
+}
+
 pub fn task_owned(receipt: &str) -> bool {
     receipt.contains(&format!("<Command>{}\\sing-box.exe</Command>", crate::ROOT))
         && (receipt.contains(&format!(
@@ -178,16 +192,15 @@ mod native {
         let path = config::installed();
         let current = config::read(&path)?;
         if is_running()? {
-            if crate::selector::runtime_selected(crate::model::Target::Desktop).is_ok()
-                && crate::selector::runtime_selected(crate::model::Target::Wsl).is_ok()
-            {
-                // The existing native task owns both lifecycle and recovery.
-                // Re-enable after an interrupted explicit Stop; IgnoreNew
-                // prevents duplicate native sing-box instances.
-                enable_task()?;
-                return Ok(());
-            }
-            return Err("RUNNING_SING_BOX_UNHEALTHY");
+            super::windows_start_gate(
+                true,
+                crate::selector::runtime_selected(crate::model::Target::Desktop)
+                    .map(|_| ()),
+            )?;
+            // The existing native task owns lifecycle and recovery.
+            // Do not require Ubuntu or the WSL selector for Windows startup.
+            enable_task()?;
+            return Ok(());
         }
         if other_processes()? {
             return Err("FOREIGN_SING_BOX_PROCESS");
@@ -202,16 +215,19 @@ mod native {
         if !o.status.success() {
             return Err("TASK_START_REJECTED");
         }
+        // A bounded safety ceiling, not a success timer. Return the exact
+        // failing readiness condition; the WSL selector is not a Windows gate.
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if is_running()?
-                && crate::selector::runtime_selected(crate::model::Target::Desktop).is_ok()
-                && crate::selector::runtime_selected(crate::model::Target::Wsl).is_ok()
-            {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err("TASK_START_UNVERIFIED");
+            let running = is_running()?;
+            let desktop = if running {
+                crate::selector::runtime_selected(crate::model::Target::Desktop).map(|_| ())
+            } else {
+                Err("TASK_PROCESS_NOT_RUNNING")
+            };
+            let state = super::windows_start_gate(running, desktop);
+            if state.is_ok() || Instant::now() >= deadline {
+                return state;
             }
             thread::sleep(Duration::from_millis(200));
         }
@@ -339,6 +355,18 @@ mod tests {
     fn no_fallback_to_unowned_scheduler() {
         assert!(!task_owned(""));
         assert!(!task_owned("<Task><Actions><Exec /></Actions></Task>"));
+    }
+    #[test]
+    fn windows_start_does_not_depend_on_wsl_selector() {
+        assert_eq!(windows_start_gate(true, Ok(())), Ok(()));
+        assert_eq!(
+            windows_start_gate(false, Ok(())),
+            Err("TASK_PROCESS_NOT_RUNNING")
+        );
+        assert_eq!(
+            windows_start_gate(true, Err("SING_BOX_API_UNREACHABLE")),
+            Err("SING_BOX_API_UNREACHABLE")
+        );
     }
     #[test]
     fn task_state_is_numeric_and_fail_closed() {
