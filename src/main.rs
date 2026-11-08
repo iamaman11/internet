@@ -322,9 +322,6 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         ("wsl", ["wsl", "tun", "dns", "setup"]) => wsl_tun_runtime::dns_setup(),
         ("wsl", ["wsl", "tun", "diagnose"]) => wsl_tun_runtime::diagnose(),
         ("wsl", ["wsl", "tun", "on"]) => wsl_tun_runtime::on(),
-        ("wsl", ["wsl", "tun", "on", "--allow-mcp-reconnect"]) => {
-            wsl_tun_runtime::on_allow_mcp_reconnect()
-        }
         ("wsl", ["wsl", "tun", "off"]) => wsl_tun_runtime::off(),
         ("tun", ["tun", "status"]) | ("selected-apps", ["selected-apps", "status"]) => {
             tun::status()
@@ -394,7 +391,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         ("help", _) | ("--help", _) => Ok(
             json!({"version":env!("CARGO_PKG_VERSION"),"commands":["status [--deep]","tree","inspect <id>","diagnose [id]",
             "route <direct-auto|direct-hysteria2|direct-vless|warp-auto|warp-hysteria2|warp-vless>",
-            "wsl route <same>","wsl tun <on|off|status|diagnose>","wsl tun dns setup (one-time native Ubuntu setup)","wsl tun on --allow-mcp-reconnect (detached local CLI only)","wsl sync (offline attach)","start","stop","restart","configure --stdin",
+            "wsl route <same>","wsl tun <on|off|status|diagnose>","wsl tun dns setup (one-time native Ubuntu setup)","wsl sync (offline attach)","start","stop","restart","configure --stdin",
             "backup export <external-directory>","restore <external-directory>",
              "windows-mode <normal|selected|all|status>",
              "tun <status|on|off>","selected-apps <status|on|off|add EXE|remove EXE>",
@@ -461,20 +458,17 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
                         "Inspect native Ubuntu /etc/wsl.conf and /etc/resolv.conf; refuse to overwrite foreign DNS policy"
                     } else if code == "WSL_DNS_SETUP_FAILED" {
                         "Native DNS provisioning failed; inspect Ubuntu DNS and WSL configuration without switching Windows routes"
-                    } else if code == "WSL_TUN_RESTART_CONTROL_NOT_VERIFIED" {
-                        "Windows TUN/MCP unchanged; initial endpoint installation or stale WSL IP requires an independently verified control path"
-                    } else if code == "WSL_TUN_PEER_STALE_REQUIRES_RECONFIGURE" {
-                        "WSL NAT address changed; use guarded native WSL endpoint reconfiguration"
+                    } else if code == "WSL_WG_ENDPOINT_NOT_CONFIGURED"
+                        || code == "WSL_TUN_ENDPOINT_RECONFIGURATION_REQUIRED" {
+                        "WSL Windows WireGuard endpoint is absent or its peer differs; Windows sing-box/TUN/MCP unchanged. Inspect exact endpoint and configure separately, then retry WSL ON"
                     } else if code == "WSL_TUN_GUEST_OWNER_CONFLICT" {
                         "Inspect Ubuntu interface, rules and DNS; do not remove unidentified resources"
                     } else if code == "WSL_WG_FIREWALL_OWNER_CONFLICT" {
                         "INTERNET-WSL-WG-43913: rule identity or WSL interface ownership conflicts. Check exact rule and current vEthernet (WSL) adapter; no broad firewall change"
-                    } else if code == "WSL_WG_FIREWALL_APPLY_UNCONFIRMED" {
-                        "INTERNET-WSL-WG-43913: native interface rebinding/readback failed; inspect exact rule and Ubuntu state before retrying"
-                    } else if code == "WSL_WG_FIREWALL_ROLLBACK_UNCONFIRMED" {
-                        "INTERNET-WSL-WG-43913: firewall rollback not verified; inspect exact owned rule and WSL TUN before another change"
+                    } else if code == "WSL_WG_FIREWALL_RECONFIGURATION_REQUIRED" {
+                        "INTERNET-WSL-WG-43913: exact owned Firewall rule is absent or has stale WSL NAT addresses. Windows unchanged; inspect native rule before explicit Windows configuration"
                     } else if code == "WSL_WG_WINDOWS_LISTENER_NOT_READY" {
-                        "Managed sing-box has no UDP 43913 listener; Windows TUN/MCP unchanged. Use detached internet wsl tun on --allow-mcp-reconnect only with a recoverable control path"
+                        "Managed sing-box has no UDP 43913 listener despite configured endpoint. WSL ON will not restart Windows; inspect exact task, native socket and sing-box 1.14.2 listener initialization"
                     } else if code == "WSL_WG_WINDOWS_LISTENER_READBACK_FAILED" {
                         "Inspect the owned Windows sing-box task/process and native UDP 43913 socket without changing routes"
                     } else if code == "WSL_WG_HANDSHAKE_UNVERIFIED" {
@@ -738,7 +732,7 @@ fn menu_wsl(session: &mut menu_view::Session) -> Option<Vec<String>> {
     if let Err(code) = state {
         println!("WSL readback: {code}");
     }
-    println!("1. WSL native TUN ON (initial attach may require a controlled sing-box restart)");
+    println!("1. WSL native TUN ON (Ubuntu only; never restarts Windows sing-box)");
     println!("2. WSL native TUN OFF");
     println!("3. Choose WSL DIRECT / WARP route");
     println!("4. Test WSL IPv4 HTTPS egress via native WireGuard");

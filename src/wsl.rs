@@ -325,6 +325,20 @@ $a=$r | Get-NetFirewallAddressFilter
     ))))
 }
 
+/// WSL ON validates the exact existing Windows-owned rule read-only.
+/// Applying/rebinding the rule belongs to explicit Windows provisioning.
+#[cfg(windows)]
+pub fn wireguard_firewall_verify(
+    network: &Network,
+    interface: &str,
+) -> Result<(), &'static str> {
+    let before = wireguard_firewall_snapshot(network, interface)?;
+    match before.0 {
+        Some((local, remote, _)) if local == network.gateway && remote == network.guest => Ok(()),
+        _ => Err("WSL_WG_FIREWALL_RECONFIGURATION_REQUIRED"),
+    }
+}
+
 #[cfg(windows)]
 pub fn wireguard_firewall_restore(
     network: &Network,

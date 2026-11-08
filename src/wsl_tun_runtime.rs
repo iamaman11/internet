@@ -4,8 +4,8 @@ use serde_json::Value;
 #[cfg(windows)]
 use serde_json::json;
 
-// A live, correctly addressed listener may use the legacy NIC-bound JSON;
-// the next normal Windows start removes that obsolete binding offline.
+// Read-only validation for the already-installed Windows endpoint.
+// WSL ON/OFF never reconfigure or restart the native Windows sing-box task.
 #[cfg(any(windows, test))]
 fn endpoint_needs_update(
     configured: bool,
@@ -222,26 +222,6 @@ mod native {
         }
         Ok(name)
     }
-    fn native_check(c: &Value) -> Result<(), &'static str> {
-        let dir = config::installed()
-            .parent()
-            .ok_or("CONFIG_PATH_INVALID")?
-            .to_path_buf();
-        config::protect_private_directory(&dir)?;
-        let check = dir.join("sing-box.u7-check.json");
-        let f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&check)
-            .map_err(|_| "CONFIG_CHECK_CONFLICT")?;
-        serde_json::to_writer(f, c).map_err(|_| "CONFIG_CHECK_WRITE_FAILED")?;
-        let r = lifecycle::native_check(&check);
-        let cleanup = fs::remove_file(&check);
-        if cleanup.is_err() {
-            return Err("WSL_SECRET_CHECK_CLEANUP_FAILED");
-        }
-        r
-    }
     fn check_egress() -> Result<String, &'static str> {
         // Use ordinary guest networking; explicitly remove proxy variables.
         let mut c = Command::new("wsl.exe");
@@ -314,21 +294,6 @@ mod native {
             && s["dns_redirected"] == true
             && s["ipv6_guard"] == true
     }
-    fn cleanup_previous() -> Result<(), &'static str> {
-        let backup = Path::new(crate::ROOT)
-            .join("config")
-            .join("sing-box.previous.json");
-        if backup.exists() {
-            // Only remove a file which carries our validated transient layer.
-            let raw = fs::read(&backup).map_err(|_| "WSL_SECRET_BACKUP_READ_FAILED")?;
-            let c: Value = serde_json::from_slice(&raw).map_err(|_| "WSL_SECRET_BACKUP_UNOWNED")?;
-            if wsl_tun::split(&c)?.1.is_some() {
-                fs::remove_file(&backup).map_err(|_| "WSL_SECRET_BACKUP_CLEANUP_FAILED")?;
-            }
-        }
-        Ok(())
-    }
-
     /// One-time native Ubuntu DNS setup. No additional runtime service or secret store.
     pub fn dns_setup() -> Result<Value, &'static str> {
         let s = guest_state()?;
@@ -387,21 +352,12 @@ mod native {
             "other_protocols":"NOT_TESTED",
             "next_action":"Verify DNS UDP IPv6 and independent Windows paths"}))
     }
-    /// ON is idempotent. With an installed Windows endpoint, only Ubuntu
-    /// kernel routes and DNS change. Initial Windows attachment is guarded.
+    /// Idempotent guest-only ON. Windows sing-box, its configuration, native
+    /// task, TUN, firewall and MCP are never modified by this operation.
+    /// Initial endpoint provisioning is a separate explicit Windows action.
     pub fn on() -> Result<Value, &'static str> {
-        on_inner(false)
-    }
-    /// Explicit operator-approved reconnect of the existing MCP-over-TUN link.
-    /// This must run in a detached instance of the same Rust CLI so that
-    /// the operation and its rollback outlive a temporary MCP disconnect.
-    pub fn on_allow_mcp_reconnect() -> Result<Value, &'static str> {
-        on_inner(true)
-    }
-    fn on_inner(allow_mcp_reconnect: bool) -> Result<Value, &'static str> {
-        let path = config::installed();
-        let old = config::read(&path)?;
-        let configured = wsl_tun::split(&old)?.1.is_some();
+        let current = config::read(&config::installed())?;
+        let configured = wsl_tun::split(&current)?.1.is_some();
         let before = guest_state()?;
         if configured && active(&before) && before["handshake_observed"] == true {
             let test = diagnose()?;
@@ -418,89 +374,36 @@ mod native {
         {
             return Err("WSL_TUN_GUEST_OWNER_CONFLICT");
         }
-        let running = lifecycle::is_running()?;
+        // All Windows prerequisites are read before changing anything in Ubuntu.
+        if !configured {
+            return Err("WSL_WG_ENDPOINT_NOT_CONFIGURED");
+        }
+        if !lifecycle::is_running()? {
+            return Err("WSL_TUN_WINDOWS_NOT_RUNNING");
+        }
         let network = wsl::discover_for_start()?.ok_or("WSL_GUEST_UNAVAILABLE")?;
         let interface = windows_binding(network.gateway)?;
         let guest_pub = guest_public()?;
         let windows_private = windows_private()?;
         let windows_pub = windows_public(&windows_private)?;
-        let ip = network.guest.to_string();
-        // Preserve the working Windows TUN/MCP link: a legacy NIC binding
-        // alone does not require a live restart when UDP 43913 is listening.
-        // A stale peer or an old detour endpoint still requires reconfiguration.
-        let needs_update = super::endpoint_needs_update(
+        if super::endpoint_needs_update(
             configured,
-            &old["endpoints"][0],
-            &ip,
+            &current["endpoints"][0],
+            &network.guest.to_string(),
             &guest_pub,
             &windows_private,
-        );
-        if !running && !needs_update {
-            return Err("WSL_TUN_WINDOWS_NOT_RUNNING");
+        ) {
+            return Err("WSL_TUN_ENDPOINT_RECONFIGURATION_REQUIRED");
         }
-        // Never silently restart a managed Windows TUN/control connection.
-        if needs_update
-            && running
-            && crate::tun::status()?["managed_tun"] == true
-            && !allow_mcp_reconnect
-        {
-            return Err("WSL_TUN_RESTART_CONTROL_NOT_VERIFIED");
+        if !windows_wg_listener_ready()? {
+            return Err("WSL_WG_WINDOWS_LISTENER_NOT_READY");
         }
-        let candidate = if needs_update {
-            let base = if configured {
-                wsl_tun::remove(&old)?
-            } else {
-                old.clone()
-            };
-            let next = wsl_tun::render(
-                &base,
-                &wsl_tun::Options {
-                    guest_ip: network.guest,
-                    wsl_interface: &interface,
-                    windows_private_key: &windows_private,
-                    guest_public_key: &guest_pub,
-                },
-            )?;
-            native_check(&next)?;
-            next
-        } else {
-            old.clone()
-        };
-        // Fail before mutating Ubuntu if a healthy Windows task lacks the
-        // expected native UDP listener. Only the explicit detached recovery
-        // path may briefly reconnect MCP-over-TUN.
-        if configured && running && !needs_update && !windows_wg_listener_ready()? {
-            if !allow_mcp_reconnect {
-                return Err("WSL_WG_WINDOWS_LISTENER_NOT_READY");
-            }
-            lifecycle::restart()?;
-            if !windows_wg_listener_ready()? {
-                return Err("WSL_WG_WINDOWS_LISTENER_NOT_READY");
-            }
-        }
-        // Snapshot only the exact Rust-owned firewall rule, in memory.
-        // A failed guest prepare must never leave a new Windows allowance.
-        let firewall_before = wsl::wireguard_firewall_snapshot(&network, &interface)?;
-        let mut modified_windows = false;
+        // No automatic Windows firewall edits in WSL ON. An absent or stale
+        // owned rule is a setup fault, not permission to mutate Windows.
+        wsl::wireguard_firewall_verify(&network, &interface)?;
         let result = (|| -> Result<Value, &'static str> {
-            // Prepare retains the native NAT default until handshake.
-            // Both prepare and firewall application belong to this rollback.
+            // Prepare keeps Ubuntu's NAT default until a real handshake.
             guest("prepare", Some(&windows_pub))?;
-            wsl::wireguard_firewall_allow(&network, &interface)?;
-            if needs_update {
-                if running {
-                    lifecycle::stop()?;
-                }
-                config::write_checked(&path, &candidate)?;
-                modified_windows = true;
-                lifecycle::start()?;
-            }
-            if !windows_wg_listener_ready()? {
-                return Err("WSL_WG_WINDOWS_LISTENER_NOT_READY");
-            }
-            // Send an isolated peer packet before changing Ubuntu's default
-            // route; a fresh kernel WG interface must initiate a handshake
-            // even when Windows sing-box was already running for hours.
             guest("probe", None)?;
             let deadline = Instant::now() + Duration::from_secs(25);
             let mut handshake = false;
@@ -518,9 +421,9 @@ mod native {
             }
             guest("activate", Some(&guest_pub))?;
             let ip = check_egress()?;
-            let chosen = config::selected(&candidate, Target::Wsl)?;
+            let chosen = config::selected(&current, Target::Wsl)?;
             if chosen.tag().starts_with("direct-")
-                && ip != expected_vm_ipv4(&candidate)?.to_string()
+                && ip != expected_vm_ipv4(&current)?.to_string()
             {
                 return Err("WSL_TUN_EGRESS_NOT_VM");
             }
@@ -531,25 +434,13 @@ mod native {
             Ok(json!({"ok":true,"changed":true,"state":"ON",
                 "handshake":"PASS","public_ip4":ip,"route":chosen.tag(),
                 "dns_ipv6_route_readback":"PASS",
+                "windows_process_unchanged":true,
                 "udp_dns_independent_apps":"NOT_TESTED"}))
         })();
         match result {
             Ok(v) => Ok(v),
             Err(code) => {
-                let guest_clean = guest("off", Some(&guest_pub)).is_ok();
-                let firewall_restored =
-                    wsl::wireguard_firewall_restore(&network, &interface, &firewall_before).is_ok();
-                let windows_restored = if modified_windows {
-                    lifecycle::stop().is_ok()
-                        && config::write_checked(&path, &old).is_ok()
-                        && (!running || lifecycle::start().is_ok())
-                        && cleanup_previous().is_ok()
-                } else if needs_update && running {
-                    lifecycle::is_running().unwrap_or(false) || lifecycle::start().is_ok()
-                } else {
-                    true
-                };
-                if !guest_clean || !windows_restored || !firewall_restored {
+                if guest("off", Some(&guest_pub)).is_err() {
                     return Err("WSL_TUN_ROLLBACK_UNCONFIRMED");
                 }
                 Err(code)
@@ -591,7 +482,7 @@ mod native {
 }
 
 #[cfg(windows)]
-pub use native::{diagnose, dns_setup, off, on, on_allow_mcp_reconnect, status};
+pub use native::{diagnose, dns_setup, off, on, status};
 
 #[cfg(not(windows))]
 pub fn dns_setup() -> Result<Value, &'static str> {
@@ -611,10 +502,6 @@ pub fn on() -> Result<Value, &'static str> {
 }
 #[cfg(not(windows))]
 pub fn off() -> Result<Value, &'static str> {
-    Err("WINDOWS_ONLY")
-}
-#[cfg(not(windows))]
-pub fn on_allow_mcp_reconnect() -> Result<Value, &'static str> {
     Err("WINDOWS_ONLY")
 }
 
