@@ -51,11 +51,16 @@ fn check_layer(layer: &Layer) -> Result<(), &'static str> {
             .is_none_or(|s| !key_like(s))
         || (if endpoint.get("listen_port").is_some() {
             endpoint["listen_port"].as_u64() != Some(u64::from(WINDOWS_WG_LISTEN_PORT))
-                || endpoint.get("bind_interface").is_some_and(|v| {
-                    v.as_str().is_none_or(|s| !valid_wsl_interface(s))
-                })
+                || endpoint
+                    .get("bind_interface")
+                    .is_some_and(|v| v.as_str().is_none_or(|s| !valid_wsl_interface(s)))
                 || endpoint.as_object().is_none_or(|o| {
-                    o.len() != if endpoint.get("bind_interface").is_some() { 7 } else { 6 }
+                    o.len()
+                        != if endpoint.get("bind_interface").is_some() {
+                            7
+                        } else {
+                            6
+                        }
                 })
                 || layer.outbound.is_some()
         } else {
@@ -251,7 +256,11 @@ mod tests {
         // The old interface-bound listener is accepted for one-time migration.
         // The new listener has no WSL boot-order dependency.
         let mut independent = modern.clone();
-        independent.endpoint.as_object_mut().unwrap().remove("bind_interface");
+        independent
+            .endpoint
+            .as_object_mut()
+            .unwrap()
+            .remove("bind_interface");
         assert!(check_layer(&independent).is_ok());
         assert_eq!(independent.endpoint.as_object().unwrap().len(), 6);
         let base = json!({"outbounds":[{"type":"direct","tag":"main"}],
