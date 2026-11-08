@@ -564,7 +564,10 @@ mod no_windows_mutation_tests {
     fn wsl_on_off_cannot_restart_or_reconfigure_windows() {
         let source = include_str!("wsl_tun_runtime.rs");
         let start = source.find("    pub fn on() -> Result<Value").unwrap();
-        let end = source[start..].find("    /// OFF changes only Ubuntu;").unwrap() + start;
+        let end = source[start..]
+            .find("    /// OFF changes only Ubuntu;")
+            .unwrap()
+            + start;
         let on_body = &source[start..end];
         for forbidden in [
             "lifecycle::restart(",
@@ -581,7 +584,11 @@ mod no_windows_mutation_tests {
             );
         }
         let off_body = &source[end..source.find("#[cfg(windows)]\npub use native::").unwrap()];
-        for forbidden in ["lifecycle::", "config::write_checked(", "wireguard_firewall_allow("] {
+        for forbidden in [
+            "lifecycle::",
+            "config::write_checked(",
+            "wireguard_firewall_allow(",
+        ] {
             assert!(
                 !off_body.contains(forbidden),
                 "WSL OFF must never alter Windows: {forbidden}"
