@@ -12,6 +12,20 @@ fn task_state_running(state: i32) -> Result<bool, &'static str> {
     }
 }
 
+/// Windows startup requires only the native managed task and the Desktop
+/// selector. WSL selector health is diagnosed independently, never a
+/// prerequisite for a usable Windows TUN or MCP connection.
+#[cfg(any(windows, test))]
+fn windows_start_gate(
+    task_running: bool,
+    desktop_selector: Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    if !task_running {
+        return Err("TASK_PROCESS_NOT_RUNNING");
+    }
+    desktop_selector
+}
+
 pub fn task_owned(receipt: &str) -> bool {
     receipt.contains(&format!("<Command>{}\\sing-box.exe</Command>", crate::ROOT))
         && (receipt.contains(&format!(
@@ -178,16 +192,14 @@ mod native {
         let path = config::installed();
         let current = config::read(&path)?;
         if is_running()? {
-            if crate::selector::runtime_selected(crate::model::Target::Desktop).is_ok()
-                && crate::selector::runtime_selected(crate::model::Target::Wsl).is_ok()
-            {
-                // The existing native task owns both lifecycle and recovery.
-                // Re-enable after an interrupted explicit Stop; IgnoreNew
-                // prevents duplicate native sing-box instances.
-                enable_task()?;
-                return Ok(());
-            }
-            return Err("RUNNING_SING_BOX_UNHEALTHY");
+            super::windows_start_gate(
+                true,
+                crate::selector::runtime_selected(crate::model::Target::Desktop).map(|_| ()),
+            )?;
+            // The existing native task owns lifecycle and recovery.
+            // Do not require Ubuntu or the WSL selector for Windows startup.
+            enable_task()?;
+            return Ok(());
         }
         if other_processes()? {
             return Err("FOREIGN_SING_BOX_PROCESS");
@@ -202,16 +214,19 @@ mod native {
         if !o.status.success() {
             return Err("TASK_START_REJECTED");
         }
+        // A bounded safety ceiling, not a success timer. Return the exact
+        // failing readiness condition; the WSL selector is not a Windows gate.
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if is_running()?
-                && crate::selector::runtime_selected(crate::model::Target::Desktop).is_ok()
-                && crate::selector::runtime_selected(crate::model::Target::Wsl).is_ok()
-            {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err("TASK_START_UNVERIFIED");
+            let running = is_running()?;
+            let desktop = if running {
+                crate::selector::runtime_selected(crate::model::Target::Desktop).map(|_| ())
+            } else {
+                Err("TASK_PROCESS_NOT_RUNNING")
+            };
+            let state = super::windows_start_gate(running, desktop);
+            if state.is_ok() || Instant::now() >= deadline {
+                return state;
             }
             thread::sleep(Duration::from_millis(200));
         }
@@ -265,21 +280,22 @@ mod native {
         if start().is_ok() {
             return Ok(());
         }
-        // A failed start may have fallen back to the owned WSL loopback
-        // listener. Never overwrite a concurrent or foreign modification.
+        // Native start is allowed to normalize only its own legacy WSL
+        // endpoint binding and optional local listener. This is not a
+        // concurrent foreign config change; never roll it back to a broken
+        // NIC-bound cold-boot configuration.
         let current = config::read(&path).map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
+        let normalized = crate::wsl_tun::prepare_at_windows_start(&original)
+            .map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
         if current != original
-            && config::with_wsl_loopback(&original).as_ref().ok() != Some(&current)
+            && current != normalized
+            && config::with_wsl_loopback(&normalized).as_ref().ok() != Some(&current)
         {
             return Err("TASK_RESTART_CONFIG_OWNER_CONFLICT");
         }
-        // The same Rust CLI performs one bounded recovery attempt, using the
-        // already-owned task and original validated config; not a second agent.
+        // One bounded recovery through the same owned Task, with validated
+        // current config. It never reinstates the obsolete WSL NIC binding.
         stop().map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
-        if current != original {
-            checked_replace(&path, &current, &original)
-                .map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
-        }
         if start().is_err() {
             return Err("TASK_RESTART_RECOVERY_UNCONFIRMED");
         }
@@ -339,6 +355,18 @@ mod tests {
     fn no_fallback_to_unowned_scheduler() {
         assert!(!task_owned(""));
         assert!(!task_owned("<Task><Actions><Exec /></Actions></Task>"));
+    }
+    #[test]
+    fn windows_start_does_not_depend_on_wsl_selector() {
+        assert_eq!(windows_start_gate(true, Ok(())), Ok(()));
+        assert_eq!(
+            windows_start_gate(false, Ok(())),
+            Err("TASK_PROCESS_NOT_RUNNING")
+        );
+        assert_eq!(
+            windows_start_gate(true, Err("SING_BOX_API_UNREACHABLE")),
+            Err("SING_BOX_API_UNREACHABLE")
+        );
     }
     #[test]
     fn task_state_is_numeric_and_fail_closed() {
