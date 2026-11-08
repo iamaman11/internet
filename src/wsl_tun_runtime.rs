@@ -632,22 +632,42 @@ mod endpoint_tests {
             "peers": [{"address": "172.26.23.199", "public_key": "guest-test-key"}]
         });
         assert!(!endpoint_needs_update(
-            true, &endpoint, "172.26.23.199", "guest-test-key", "windows-test-key"
+            true,
+            &endpoint,
+            "172.26.23.199",
+            "guest-test-key",
+            "windows-test-key"
         ));
         assert!(endpoint_needs_update(
-            true, &endpoint, "172.26.23.200", "guest-test-key", "windows-test-key"
+            true,
+            &endpoint,
+            "172.26.23.200",
+            "guest-test-key",
+            "windows-test-key"
         ));
         assert!(endpoint_needs_update(
-            true, &endpoint, "172.26.23.199", "other-key", "windows-test-key"
+            true,
+            &endpoint,
+            "172.26.23.199",
+            "other-key",
+            "windows-test-key"
         ));
         assert!(endpoint_needs_update(
-            false, &endpoint, "172.26.23.199", "guest-test-key", "windows-test-key"
+            false,
+            &endpoint,
+            "172.26.23.199",
+            "guest-test-key",
+            "windows-test-key"
         ));
         let mut old_detour = endpoint.clone();
         old_detour.as_object_mut().unwrap().remove("listen_port");
         old_detour["detour"] = json!("wsl-transport-direct");
         assert!(endpoint_needs_update(
-            true, &old_detour, "172.26.23.199", "guest-test-key", "windows-test-key"
+            true,
+            &old_detour,
+            "172.26.23.199",
+            "guest-test-key",
+            "windows-test-key"
         ));
     }
 }

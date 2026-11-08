@@ -231,8 +231,7 @@ pub fn unbind_at_windows_start(current: &Value) -> Result<Value, &'static str> {
     let Some(layer) = layer else {
         return Ok(current.clone());
     };
-    if layer.endpoint.get("listen_port").is_none()
-        || layer.endpoint.get("bind_interface").is_none()
+    if layer.endpoint.get("listen_port").is_none() || layer.endpoint.get("bind_interface").is_none()
     {
         return Ok(current.clone());
     }
@@ -290,8 +289,14 @@ mod tests {
         let candidate = attach(&base, Some(&modern)).unwrap();
         let unbound = unbind_at_windows_start(&candidate).unwrap();
         assert!(unbound["endpoints"][0].get("bind_interface").is_none());
-        assert_eq!(unbound["endpoints"][0]["listen_port"], WINDOWS_WG_LISTEN_PORT);
-        assert_eq!(unbound["endpoints"][0]["peers"], candidate["endpoints"][0]["peers"]);
+        assert_eq!(
+            unbound["endpoints"][0]["listen_port"],
+            WINDOWS_WG_LISTEN_PORT
+        );
+        assert_eq!(
+            unbound["endpoints"][0]["peers"],
+            candidate["endpoints"][0]["peers"]
+        );
         assert_eq!(unbind_at_windows_start(&unbound).unwrap(), unbound);
         assert_eq!(unbind_at_windows_start(&base).unwrap(), base);
         let (restored, layer) = split(&candidate).unwrap();

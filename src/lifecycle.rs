@@ -194,8 +194,7 @@ mod native {
         if is_running()? {
             super::windows_start_gate(
                 true,
-                crate::selector::runtime_selected(crate::model::Target::Desktop)
-                    .map(|_| ()),
+                crate::selector::runtime_selected(crate::model::Target::Desktop).map(|_| ()),
             )?;
             // The existing native task owns lifecycle and recovery.
             // Do not require Ubuntu or the WSL selector for Windows startup.
