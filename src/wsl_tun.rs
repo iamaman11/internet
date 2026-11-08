@@ -51,10 +51,12 @@ fn check_layer(layer: &Layer) -> Result<(), &'static str> {
             .is_none_or(|s| !key_like(s))
         || (if endpoint.get("listen_port").is_some() {
             endpoint["listen_port"].as_u64() != Some(u64::from(WINDOWS_WG_LISTEN_PORT))
-                || endpoint["bind_interface"]
-                    .as_str()
-                    .is_none_or(|s| !valid_wsl_interface(s))
-                || endpoint.as_object().is_none_or(|o| o.len() != 7)
+                || endpoint.get("bind_interface").is_some_and(|v| {
+                    v.as_str().is_none_or(|s| !valid_wsl_interface(s))
+                })
+                || endpoint.as_object().is_none_or(|o| {
+                    o.len() != if endpoint.get("bind_interface").is_some() { 7 } else { 6 }
+                })
                 || layer.outbound.is_some()
         } else {
             endpoint["detour"] != TRANSPORT_TAG
@@ -198,7 +200,8 @@ pub fn render(original: &Value, opts: &Options<'_>) -> Result<Value, &'static st
             "address":[WINDOWS_WG_IP],
             "private_key":opts.windows_private_key,
             "listen_port":WINDOWS_WG_LISTEN_PORT,
-            "bind_interface":opts.wsl_interface,
+            // UDP socket must exist before WSL starts; the exact owned
+            // Windows Firewall rule limits ingress to the WSL interface.
             "peers":[{
                 "address":opts.guest_ip.to_string(),
                 "port": WG_LISTEN_PORT,
@@ -245,6 +248,12 @@ mod tests {
             rule: expected_rule(),
         };
         assert!(check_layer(&modern).is_ok());
+        // The old interface-bound listener is accepted for one-time migration.
+        // The new listener has no WSL boot-order dependency.
+        let mut independent = modern.clone();
+        independent.endpoint.as_object_mut().unwrap().remove("bind_interface");
+        assert!(check_layer(&independent).is_ok());
+        assert_eq!(independent.endpoint.as_object().unwrap().len(), 6);
         let base = json!({"outbounds":[{"type":"direct","tag":"main"}],
             "route":{"rules":[]}});
         let candidate = attach(&base, Some(&modern)).unwrap();

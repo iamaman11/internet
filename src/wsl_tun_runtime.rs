@@ -148,6 +148,28 @@ mod native {
         }
         Ok(value)
     }
+    // Read actual Windows UDP ownership: RUNNING Task Scheduler and valid
+    // config do not prove that the optional WG listener is active.
+    fn windows_wg_listener_ready() -> Result<bool, &'static str> {
+        let script = format!(
+            "$p=@(Get-CimInstance Win32_Process -Filter \"Name='sing-box.exe'\" | Where-Object {{ $_.ExecutablePath -eq 'C:\\internet\\sing-box.exe' }}); if($p.Count -ne 1){{exit 4}}; $u=@(Get-NetUDPEndpoint -LocalPort {} -ErrorAction SilentlyContinue | Where-Object {{ $_.OwningProcess -eq $p[0].ProcessId }}); if($u.Count -gt 0){{'READY'}}else{{'MISSING'}}",
+            wsl_tun::WINDOWS_WG_LISTEN_PORT
+        );
+        let mut c = Command::new("powershell.exe");
+        c.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+        let out = output(c).map_err(|_| "WSL_WG_WINDOWS_LISTENER_READBACK_FAILED")?;
+        if !out.status.success() {
+            return Err("WSL_WG_WINDOWS_LISTENER_READBACK_FAILED");
+        }
+        match std::str::from_utf8(&out.stdout)
+            .map_err(|_| "WSL_WG_WINDOWS_LISTENER_READBACK_FAILED")?
+            .trim()
+        {
+            "READY" => Ok(true),
+            "MISSING" => Ok(false),
+            _ => Err("WSL_WG_WINDOWS_LISTENER_READBACK_FAILED"),
+        }
+    }
     fn guest_state() -> Result<Value, &'static str> {
         guest("status", None)
     }
@@ -385,21 +407,17 @@ mod native {
         let windows_pub = windows_public(&windows_private)?;
         let ip = network.guest.to_string();
         let peer = &old["endpoints"][0]["peers"][0];
-        let native_if = if old["endpoints"][0]["listen_port"].is_number() {
-            old["endpoints"][0]["bind_interface"].as_str()
-        } else {
-            old["outbounds"]
-                .as_array()
-                .and_then(|a| a.last())
-                .and_then(|v| v["bind_interface"].as_str())
-        };
+        // Migrating the previous adapter-bound endpoint is a one-time
+        // explicit change, not a hidden restart of Windows/MCP.
+        let legacy_interface_bind = old["endpoints"][0].get("bind_interface").is_some()
+            || old["endpoints"][0].get("detour").is_some();
         let needs_update = !configured
             || old["endpoints"][0]["listen_port"].as_u64()
                 != Some(u64::from(wsl_tun::WINDOWS_WG_LISTEN_PORT))
             || peer["address"].as_str() != Some(ip.as_str())
             || peer["public_key"].as_str() != Some(guest_pub.as_str())
             || old["endpoints"][0]["private_key"].as_str() != Some(windows_private.as_str())
-            || native_if != Some(interface.as_str());
+            || legacy_interface_bind;
         if !running && !needs_update {
             return Err("WSL_TUN_WINDOWS_NOT_RUNNING");
         }
@@ -431,6 +449,18 @@ mod native {
         } else {
             old.clone()
         };
+        // Fail before mutating Ubuntu if a healthy Windows task lacks the
+        // expected native UDP listener. Only the explicit detached recovery
+        // path may briefly reconnect MCP-over-TUN.
+        if configured && running && !needs_update && !windows_wg_listener_ready()? {
+            if !allow_mcp_reconnect {
+                return Err("WSL_WG_WINDOWS_LISTENER_NOT_READY");
+            }
+            lifecycle::restart()?;
+            if !windows_wg_listener_ready()? {
+                return Err("WSL_WG_WINDOWS_LISTENER_NOT_READY");
+            }
+        }
         // Snapshot only the exact Rust-owned firewall rule, in memory.
         // A failed guest prepare must never leave a new Windows allowance.
         let firewall_before = wsl::wireguard_firewall_snapshot(&network, &interface)?;
@@ -447,6 +477,9 @@ mod native {
                 config::write_checked(&path, &candidate)?;
                 modified_windows = true;
                 lifecycle::start()?;
+            }
+            if !windows_wg_listener_ready()? {
+                return Err("WSL_WG_WINDOWS_LISTENER_NOT_READY");
             }
             // Send an isolated peer packet before changing Ubuntu's default
             // route; a fresh kernel WG interface must initiate a handshake

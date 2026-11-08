@@ -473,8 +473,12 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
                         "INTERNET-WSL-WG-43913: native interface rebinding/readback failed; inspect exact rule and Ubuntu state before retrying"
                     } else if code == "WSL_WG_FIREWALL_ROLLBACK_UNCONFIRMED" {
                         "INTERNET-WSL-WG-43913: firewall rollback not verified; inspect exact owned rule and WSL TUN before another change"
+                    } else if code == "WSL_WG_WINDOWS_LISTENER_NOT_READY" {
+                        "Managed sing-box has no UDP 43913 listener; Windows TUN/MCP unchanged. Use detached internet wsl tun on --allow-mcp-reconnect only with a recoverable control path"
+                    } else if code == "WSL_WG_WINDOWS_LISTENER_READBACK_FAILED" {
+                        "Inspect the owned Windows sing-box task/process and native UDP 43913 socket without changing routes"
                     } else if code == "WSL_WG_HANDSHAKE_UNVERIFIED" {
-                        "Check native Windows endpoint, current WSL adapter/guest IP and peer identity; Ubuntu NAT restored"
+                        "UDP listener was ready; inspect WSL WireGuard peer and exact Windows Firewall scope; Ubuntu NAT restored"
                     } else if code == "WSL_TUN_ROLLBACK_UNCONFIRMED" {
                         "Inspect Windows sing-box task and Ubuntu routes before attempting any further change"
                     } else if code == "TASK_RESTART_RECOVERED" {
