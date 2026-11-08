@@ -285,7 +285,7 @@ mod native {
         // concurrent foreign config change; never roll it back to a broken
         // NIC-bound cold-boot configuration.
         let current = config::read(&path).map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
-        let normalized = crate::wsl_tun::unbind_at_windows_start(&original)
+        let normalized = crate::wsl_tun::prepare_at_windows_start(&original)
             .map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
         if current != original
             && current != normalized

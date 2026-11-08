@@ -54,13 +54,12 @@ fn check_layer(layer: &Layer) -> Result<(), &'static str> {
                 || endpoint
                     .get("bind_interface")
                     .is_some_and(|v| v.as_str().is_none_or(|s| !valid_wsl_interface(s)))
+                || endpoint.get("inet4_bind_address").is_some_and(|v| v != "0.0.0.0")
                 || endpoint.as_object().is_none_or(|o| {
                     o.len()
-                        != if endpoint.get("bind_interface").is_some() {
-                            7
-                        } else {
-                            6
-                        }
+                        != 6
+                            + usize::from(endpoint.get("bind_interface").is_some())
+                            + usize::from(endpoint.get("inet4_bind_address").is_some())
                 })
                 || layer.outbound.is_some()
         } else {
@@ -205,8 +204,12 @@ pub fn render(original: &Value, opts: &Options<'_>) -> Result<Value, &'static st
             "address":[WINDOWS_WG_IP],
             "private_key":opts.windows_private_key,
             "listen_port":WINDOWS_WG_LISTEN_PORT,
-            // UDP socket must exist before WSL starts; the exact owned
-            // Windows Firewall rule limits ingress to the WSL interface.
+            // Preserve Windows route.auto_detect_interface for Windows TUN,
+            // but prevent its UDP listener-control from binding this optional
+            // WireGuard socket to the wrong interface after cold boot.
+            "inet4_bind_address":"0.0.0.0",
+            // The exact owned Windows Firewall rule limits remote UDP ingress
+            // to the WSL adapter and current native NAT guest address.
             "peers":[{
                 "address":opts.guest_ip.to_string(),
                 "port": WG_LISTEN_PORT,
@@ -226,20 +229,25 @@ pub fn render(original: &Value, opts: &Options<'_>) -> Result<Value, &'static st
 /// Called only while the native Windows task is stopped. The optional
 /// WireGuard listener must not depend on a WSL adapter that starts later.
 /// The existing firewall still restricts UDP ingress to the owned WSL NIC.
-pub fn unbind_at_windows_start(current: &Value) -> Result<Value, &'static str> {
+pub fn prepare_at_windows_start(current: &Value) -> Result<Value, &'static str> {
     let (_, layer) = split(current)?;
     let Some(layer) = layer else {
         return Ok(current.clone());
     };
-    if layer.endpoint.get("listen_port").is_none() || layer.endpoint.get("bind_interface").is_none()
+    if layer.endpoint.get("listen_port").is_none() {
+        return Ok(current.clone());
+    }
+    if layer.endpoint.get("bind_interface").is_none()
+        && layer.endpoint.get("inet4_bind_address") == Some(&json!("0.0.0.0"))
     {
         return Ok(current.clone());
     }
     let mut next = current.clone();
-    next["endpoints"][0]
+    let endpoint = next["endpoints"][0]
         .as_object_mut()
-        .ok_or("WSL_WG_ENDPOINT_UNOWNED")?
-        .remove("bind_interface");
+        .ok_or("WSL_WG_ENDPOINT_UNOWNED")?;
+    endpoint.remove("bind_interface");
+    endpoint.insert("inet4_bind_address".to_owned(), json!("0.0.0.0"));
     split(&next)?;
     Ok(next)
 }
@@ -287,8 +295,9 @@ mod tests {
         let base = json!({"outbounds":[{"type":"direct","tag":"main"}],
             "route":{"rules":[]}});
         let candidate = attach(&base, Some(&modern)).unwrap();
-        let unbound = unbind_at_windows_start(&candidate).unwrap();
+        let unbound = prepare_at_windows_start(&candidate).unwrap();
         assert!(unbound["endpoints"][0].get("bind_interface").is_none());
+        assert_eq!(unbound["endpoints"][0]["inet4_bind_address"], "0.0.0.0");
         assert_eq!(
             unbound["endpoints"][0]["listen_port"],
             WINDOWS_WG_LISTEN_PORT
@@ -297,8 +306,15 @@ mod tests {
             unbound["endpoints"][0]["peers"],
             candidate["endpoints"][0]["peers"]
         );
-        assert_eq!(unbind_at_windows_start(&unbound).unwrap(), unbound);
-        assert_eq!(unbind_at_windows_start(&base).unwrap(), base);
+        assert_eq!(prepare_at_windows_start(&unbound).unwrap(), unbound);
+        assert_eq!(prepare_at_windows_start(&base).unwrap(), base);
+        let prepared_from_unbound = prepare_at_windows_start(
+            &attach(&base, Some(&independent)).unwrap()
+        ).unwrap();
+        assert_eq!(prepared_from_unbound, unbound);
+        let mut bad_bind = unbound.clone();
+        bad_bind["endpoints"][0]["inet4_bind_address"] = json!("127.0.0.1");
+        assert_eq!(split(&bad_bind).err(), Some("WSL_WG_ENDPOINT_UNOWNED"));
         let (restored, layer) = split(&candidate).unwrap();
         assert_eq!(restored, base);
         assert!(layer.unwrap().outbound.is_none());

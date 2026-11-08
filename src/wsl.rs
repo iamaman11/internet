@@ -80,7 +80,7 @@ pub fn windows_start_config(
     // An installed WG endpoint is optional to Windows startup. Remove the
     // stale WSL-NIC bind only while sing-box is stopped; WSL ON never restarts
     // the healthy Windows runtime merely to migrate this legacy field.
-    let current = crate::wsl_tun::unbind_at_windows_start(current)?;
+    let current = crate::wsl_tun::prepare_at_windows_start(current)?;
     let address: Ipv4Addr = current
         .pointer("/inbounds/1/listen")
         .and_then(|v| v.as_str())
