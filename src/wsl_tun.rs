@@ -54,11 +54,12 @@ fn check_layer(layer: &Layer) -> Result<(), &'static str> {
                 || endpoint
                     .get("bind_interface")
                     .is_some_and(|v| v.as_str().is_none_or(|s| !valid_wsl_interface(s)))
-                || endpoint.get("inet4_bind_address").is_some_and(|v| v != "0.0.0.0")
+                || endpoint
+                    .get("inet4_bind_address")
+                    .is_some_and(|v| v != "0.0.0.0")
                 || endpoint.as_object().is_none_or(|o| {
                     o.len()
-                        != 6
-                            + usize::from(endpoint.get("bind_interface").is_some())
+                        != 6 + usize::from(endpoint.get("bind_interface").is_some())
                             + usize::from(endpoint.get("inet4_bind_address").is_some())
                 })
                 || layer.outbound.is_some()
@@ -308,9 +309,8 @@ mod tests {
         );
         assert_eq!(prepare_at_windows_start(&unbound).unwrap(), unbound);
         assert_eq!(prepare_at_windows_start(&base).unwrap(), base);
-        let prepared_from_unbound = prepare_at_windows_start(
-            &attach(&base, Some(&independent)).unwrap()
-        ).unwrap();
+        let prepared_from_unbound =
+            prepare_at_windows_start(&attach(&base, Some(&independent)).unwrap()).unwrap();
         assert_eq!(prepared_from_unbound, unbound);
         let mut bad_bind = unbound.clone();
         bad_bind["endpoints"][0]["inet4_bind_address"] = json!("127.0.0.1");
