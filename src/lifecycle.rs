@@ -280,21 +280,22 @@ mod native {
         if start().is_ok() {
             return Ok(());
         }
-        // A failed start may have fallen back to the owned WSL loopback
-        // listener. Never overwrite a concurrent or foreign modification.
+        // Native start is allowed to normalize only its own legacy WSL
+        // endpoint binding and optional local listener. This is not a
+        // concurrent foreign config change; never roll it back to a broken
+        // NIC-bound cold-boot configuration.
         let current = config::read(&path).map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
+        let normalized = crate::wsl_tun::unbind_at_windows_start(&original)
+            .map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
         if current != original
-            && config::with_wsl_loopback(&original).as_ref().ok() != Some(&current)
+            && current != normalized
+            && config::with_wsl_loopback(&normalized).as_ref().ok() != Some(&current)
         {
             return Err("TASK_RESTART_CONFIG_OWNER_CONFLICT");
         }
-        // The same Rust CLI performs one bounded recovery attempt, using the
-        // already-owned task and original validated config; not a second agent.
+        // One bounded recovery through the same owned Task, with validated
+        // current config. It never reinstates the obsolete WSL NIC binding.
         stop().map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
-        if current != original {
-            checked_replace(&path, &current, &original)
-                .map_err(|_| "TASK_RESTART_RECOVERY_UNCONFIRMED")?;
-        }
         if start().is_err() {
             return Err("TASK_RESTART_RECOVERY_UNCONFIRMED");
         }

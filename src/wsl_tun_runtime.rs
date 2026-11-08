@@ -422,8 +422,7 @@ mod native {
             guest("activate", Some(&guest_pub))?;
             let ip = check_egress()?;
             let chosen = config::selected(&current, Target::Wsl)?;
-            if chosen.tag().starts_with("direct-")
-                && ip != expected_vm_ipv4(&current)?.to_string()
+            if chosen.tag().starts_with("direct-") && ip != expected_vm_ipv4(&current)?.to_string()
             {
                 return Err("WSL_TUN_EGRESS_NOT_VM");
             }
@@ -556,6 +555,38 @@ mod endpoint_tests {
             "guest-test-key",
             "windows-test-key"
         ));
+    }
+}
+
+#[cfg(test)]
+mod no_windows_mutation_tests {
+    #[test]
+    fn wsl_on_off_cannot_restart_or_reconfigure_windows() {
+        let source = include_str!("wsl_tun_runtime.rs");
+        let start = source.find("    pub fn on() -> Result<Value").unwrap();
+        let end = source[start..].find("    /// OFF changes only Ubuntu;").unwrap() + start;
+        let on_body = &source[start..end];
+        for forbidden in [
+            "lifecycle::restart(",
+            "lifecycle::start(",
+            "lifecycle::stop(",
+            "config::write_checked(",
+            "wireguard_firewall_allow(",
+            "wireguard_firewall_restore(",
+            "allow_mcp_reconnect",
+        ] {
+            assert!(
+                !on_body.contains(forbidden),
+                "WSL ON must never alter Windows: {forbidden}"
+            );
+        }
+        let off_body = &source[end..source.find("#[cfg(windows)]\npub use native::").unwrap()];
+        for forbidden in ["lifecycle::", "config::write_checked(", "wireguard_firewall_allow("] {
+            assert!(
+                !off_body.contains(forbidden),
+                "WSL OFF must never alter Windows: {forbidden}"
+            );
+        }
     }
 }
 
