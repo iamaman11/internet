@@ -61,6 +61,20 @@ fn recovery_eligible(
     }
 }
 
+/// Recovery is a task-only restart: it must not quietly migrate or rewrite
+/// the optional WSL listener as part of the ordinary startup path.
+#[cfg(any(windows, test))]
+fn recovery_restart_config_stable(
+    installed: &serde_json::Value,
+    startup: &serde_json::Value,
+) -> Result<(), &'static str> {
+    if installed == startup {
+        Ok(())
+    } else {
+        Err("RECOVERY_START_WOULD_REWRITE_CONFIG")
+    }
+}
+
 pub fn task_owned(receipt: &str) -> bool {
     receipt.contains(&format!("<Command>{}\\sing-box.exe</Command>", crate::ROOT))
         && (receipt.contains(&format!(
@@ -97,10 +111,13 @@ mod native {
             .create_new(true)
             .open(&path)
             .map_err(|_| "RECOVERY_ALREADY_RUNNING_OR_INTERRUPTED")?;
+        // Own the sentinel before any fallible write; a failed sync must not
+        // strand the file and block every later deliberate recovery.
+        let lease = RecoveryLease(path);
         file.write_all(b"one-shot owned recovery\n")
             .and_then(|_| file.sync_all())
             .map_err(|_| "RECOVERY_LOCK_WRITE_FAILED")?;
-        Ok(RecoveryLease(path))
+        Ok(lease)
     }
 
     /// Native read-only process inventory; bounded independently of status.
@@ -171,6 +188,11 @@ catch { exit 6 }
         if !configured.tag().starts_with("direct-") {
             return Err("RECOVERY_DIRECT_VM_IPV4_REQUIRED");
         }
+        // A regular Windows start may normalize an obsolete WSL interface
+        // binding. That is not authorized by a guarded network restart.
+        // Check the exact startup candidate before ending the live Task.
+        let startup = crate::wsl::windows_start_config(config)?;
+        super::recovery_restart_config_stable(config, &startup)?;
         if selector::runtime_selected(Target::Desktop)? != configured {
             return Err("RECOVERY_DESKTOP_SELECTOR_DRIFT");
         }
@@ -658,5 +680,20 @@ mod tests {
                 Err("RECOVERY_CAUSE_UNVERIFIED_NO_MUTATION")
             );
         }
+    }
+
+    #[test]
+    fn recovery_refuses_startup_config_migration_before_stopping_task() {
+        let installed =
+            serde_json::json!({"inbounds": [], "endpoints": [{"bind_interface":"old-wsl"}]});
+        assert_eq!(
+            recovery_restart_config_stable(&installed, &installed),
+            Ok(())
+        );
+        let normalized = serde_json::json!({"inbounds": [], "endpoints": [{}]});
+        assert_eq!(
+            recovery_restart_config_stable(&installed, &normalized),
+            Err("RECOVERY_START_WOULD_REWRITE_CONFIG")
+        );
     }
 }
