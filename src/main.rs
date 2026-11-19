@@ -128,6 +128,19 @@ fn diagnostic_output(ids: &[&str], deep: bool, json_mode: bool, check_scope: boo
     );
     code
 }
+
+fn proxy_test_exit(value: &Value) -> i32 {
+    if value["ok"] == true {
+        0
+    } else if value["results"]
+        .as_array()
+        .is_some_and(|results| results.iter().any(|result| result["status"] == "FAILED"))
+    {
+        2
+    } else {
+        3 // Unverified/timeout is not a proven endpoint failure.
+    }
+}
 fn apply_route(target: Target, raw: &str) -> Result<Value, &'static str> {
     let route: Route = raw.parse().map_err(|_| "ROUTE_UNSUPPORTED")?;
     let running = match lifecycle::is_running() {
@@ -350,7 +363,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
                     } else {
                         print_proxy_tests(&v);
                     }
-                    if v["ok"] == true { 0 } else { 2 }
+                    proxy_test_exit(&v)
                 }
                 Err(code) => {
                     emit(&json!({"ok":false,"reason_code":code}), json_mode);
@@ -580,7 +593,7 @@ fn print_proxy_tests(v: &Value) {
         }
     }
     println!(
-        "PASS {}/{}; WARP is a different observed egress IP, not provider-identity proof.",
+        "PASS {}/{}; WARP PASS requires native trace and non-VM IP; no proof for failed/unknown paths.",
         v["pass"], v["total"]
     );
 }
@@ -1070,6 +1083,22 @@ mod exit_tests {
         d.health = health;
         d.reason_code = reason;
         d
+    }
+    #[test]
+    fn proxy_exit_distinguishes_unknown_from_proven_failure() {
+        assert_eq!(
+            proxy_test_exit(&json!({"ok":true,"results":[{"status":"PASS"}]})),
+            0
+        );
+        assert_eq!(
+            proxy_test_exit(&json!({"ok":false,"results":[{"status":"UNKNOWN"}]})),
+            3
+        );
+        assert_eq!(
+            proxy_test_exit(&json!({"ok":false,"results":[{"status":"PASS"},{"status":"FAILED"}]})),
+            2
+        );
+        assert_eq!(proxy_test_exit(&json!({"ok":false,"results":[]})), 3);
     }
     #[test]
     fn stopped_local_task_never_exits_zero() {
