@@ -901,6 +901,12 @@ pub fn app_diagnose(raw: &str) -> Result<Value, &'static str> {
 
 #[cfg(windows)]
 fn control_endpoints() -> Result<Vec<Ipv4Addr>, &'static str> {
+    use std::{
+        io::Read,
+        process::Stdio,
+        thread,
+        time::{Duration, Instant},
+    };
     // Distinct IP addresses do not prove independent routing: the Windows
     // Admin MCP control endpoint may legitimately be the same Vultr VM as
     // the data plane. Verify the established control socket uses the native
@@ -924,18 +930,51 @@ foreach ($socket in $sockets) {
     $socket.RemoteAddress
 }
 "#;
-    let out = std::process::Command::new("powershell.exe")
+    let mut child = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .map_err(|_| "TUN_CONTROL_QUERY_FAILED")?;
-    if !out.status.success() {
-        return Err(if out.status.code() == Some(9) {
-            "TUN_CONTROL_ROUTE_NOT_DIRECT"
-        } else {
-            "TUN_CONTROL_NOT_CONNECTED"
-        });
-    }
-    let text = String::from_utf8(out.stdout).map_err(|_| "TUN_CONTROL_QUERY_FAILED")?;
+    let deadline = Instant::now() + Duration::from_millis(3500);
+    let output = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return Err(if status.code() == Some(9) {
+                        "TUN_CONTROL_ROUTE_NOT_DIRECT"
+                    } else {
+                        "TUN_CONTROL_NOT_CONNECTED"
+                    });
+                }
+                let mut output = Vec::new();
+                child
+                    .stdout
+                    .take()
+                    .ok_or("TUN_CONTROL_QUERY_FAILED")?
+                    .take(1025)
+                    .read_to_end(&mut output)
+                    .map_err(|_| "TUN_CONTROL_QUERY_FAILED")?;
+                if output.len() > 1024 {
+                    return Err("TUN_CONTROL_QUERY_FAILED");
+                }
+                break output;
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("TUN_CONTROL_QUERY_TIMEOUT");
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("TUN_CONTROL_QUERY_FAILED");
+            }
+        }
+    };
+    let text = String::from_utf8(output).map_err(|_| "TUN_CONTROL_QUERY_FAILED")?;
     let mut ips = Vec::new();
     for line in text.lines() {
         let ip: Ipv4Addr = line.trim().parse().map_err(|_| "TUN_CONTROL_IP_UNSAFE")?;
@@ -954,6 +993,94 @@ foreach ($socket in $sockets) {
 #[cfg(not(windows))]
 fn control_endpoints() -> Result<Vec<Ipv4Addr>, &'static str> {
     Err("WINDOWS_ONLY")
+}
+
+/// A recovery may interrupt the owned dataplane only if the existing native
+/// WindowsAdminMCP control socket is independently routed over the physical
+/// interface. A shared remote VM address alone is insufficient proof.
+#[cfg(windows)]
+pub(crate) fn recovery_control_independent() -> Result<(), &'static str> {
+    control_endpoints().map(|_| ())
+}
+
+/// A managed TUN restart can interrupt other programs even when the MCP
+/// control socket is independent. Refuse an active selected-app TCP session;
+/// this is a generic exact-EXE inventory, not a Chrome/Nord/Codex blacklist.
+/// No claim is made about unobservable UDP/IPv6 or foreign shared brokers.
+#[cfg(windows)]
+pub(crate) fn recovery_selected_apps_quiescent() -> Result<(), &'static str> {
+    use std::{
+        process::{Command, Stdio},
+        thread,
+        time::{Duration, Instant},
+    };
+    let state = read_at(&path())?;
+    if !state.managed_tun || !state.selected_apps {
+        return Err("RECOVERY_ALL_MODE_IS_NOT_QUIESCENT");
+    }
+    let entries =
+        serde_json::to_string(&state.applications).map_err(|_| "RECOVERY_APP_INVENTORY_INVALID")?;
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+try {
+  $selected = @($env:INTERNET_RECOVERY_SELECTED | ConvertFrom-Json)
+  if ($selected.Count -gt 32) { exit 9 }
+  $tcp = @(Get-NetTCPConnection -State Established -ErrorAction Stop)
+  $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+  foreach ($p in $processes) {
+    $name = [string]$p.Name
+    $exe = [string]$p.ExecutablePath
+    $matched = $false
+    foreach ($entry in $selected) {
+      $rule = [string]$entry
+      $leaf = [System.IO.Path]::GetFileName($rule)
+      if ($rule.Contains('\')) {
+        if ($name -ieq $leaf -and (-not $exe -or $exe -ine $rule)) { exit 9 }
+        if ($exe -ieq $rule) { $matched = $true }
+      } elseif ($name -ieq $rule) { $matched = $true }
+    }
+    if (-not $matched) { continue }
+    # This one exact native control client was checked independently above.
+    if ($exe -like '*\WindowsAdminMCP\client\tunnel-client-runtime.exe') { continue }
+    if (@($tcp | Where-Object {$_.OwningProcess -eq $p.ProcessId}).Count -gt 0) { exit 10 }
+  }
+  exit 0
+} catch [System.UnauthorizedAccessException] { exit 5 }
+catch { exit 6 }
+"#;
+    let mut child = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("INTERNET_RECOVERY_SELECTED", entries)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "RECOVERY_APP_INVENTORY_UNKNOWN")?;
+    let deadline = Instant::now() + Duration::from_millis(6500);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return match status.code() {
+                    Some(0) => Ok(()),
+                    Some(10) => Err("RECOVERY_OTHER_SELECTED_TCP_ACTIVE"),
+                    Some(9) => Err("RECOVERY_APP_IDENTITY_AMBIGUOUS"),
+                    Some(5) => Err("RECOVERY_APP_INVENTORY_ACCESS_DENIED"),
+                    _ => Err("RECOVERY_APP_INVENTORY_UNKNOWN"),
+                };
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("RECOVERY_APP_INVENTORY_TIMEOUT");
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("RECOVERY_APP_INVENTORY_UNKNOWN");
+            }
+        }
+    }
 }
 
 #[cfg(windows)]

@@ -40,6 +40,41 @@ fn windows_start_gate(
     desktop_selector
 }
 
+/// Read-only evidence permits at most one explicitly requested recovery.
+/// TLS, HTTP, IP mismatch, and unobserved failures are not local-restart proof.
+#[cfg(any(windows, test))]
+fn recovery_eligible(
+    proof: &crate::egress::Proof,
+    repeated_timeout: bool,
+) -> Result<bool, &'static str> {
+    use crate::egress::Verdict;
+    match (proof.verdict, proof.reason) {
+        (Verdict::Pass, "DIRECT_PUBLIC_IP_CONFIRMED") => Ok(false),
+        (
+            Verdict::Failed,
+            "CURL_SOURCE_ADDRESS_UNAVAILABLE_OBSERVED"
+            | "HTTPS_CONNECT_FAILED"
+            | "HTTPS_TRANSPORT_INTERRUPTED",
+        ) => Ok(true),
+        (Verdict::Unknown, "HTTPS_DEADLINE_OR_TIMEOUT") if repeated_timeout => Ok(true),
+        _ => Err("RECOVERY_CAUSE_UNVERIFIED_NO_MUTATION"),
+    }
+}
+
+/// Recovery is a task-only restart: it must not quietly migrate or rewrite
+/// the optional WSL listener as part of the ordinary startup path.
+#[cfg(any(windows, test))]
+fn recovery_restart_config_stable(
+    installed: &serde_json::Value,
+    startup: &serde_json::Value,
+) -> Result<(), &'static str> {
+    if installed == startup {
+        Ok(())
+    } else {
+        Err("RECOVERY_START_WOULD_REWRITE_CONFIG")
+    }
+}
+
 pub fn task_owned(receipt: &str) -> bool {
     receipt.contains(&format!("<Command>{}\\sing-box.exe</Command>", crate::ROOT))
         && (receipt.contains(&format!(
@@ -52,12 +87,190 @@ pub fn task_owned(receipt: &str) -> bool {
 #[cfg(windows)]
 mod native {
     use super::*;
+    use crate::{diagnostic, egress, model::Target, selector, tun};
+    use serde_json::{Value, json};
     use std::{
         fs,
-        process::Command,
+        io::Write,
+        process::{Command, Stdio},
         thread,
         time::{Duration, Instant},
     };
+
+    struct RecoveryLease(std::path::PathBuf);
+    impl Drop for RecoveryLease {
+        fn drop(&mut self) {
+            // Only this invocation's create_new sentinel can be removed.
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    fn recovery_lease() -> Result<RecoveryLease, &'static str> {
+        let path = config::installed().with_file_name("recovery.inprogress");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|_| "RECOVERY_ALREADY_RUNNING_OR_INTERRUPTED")?;
+        // Own the sentinel before any fallible write; a failed sync must not
+        // strand the file and block every later deliberate recovery.
+        let lease = RecoveryLease(path);
+        file.write_all(b"one-shot owned recovery\n")
+            .and_then(|_| file.sync_all())
+            .map_err(|_| "RECOVERY_LOCK_WRITE_FAILED")?;
+        Ok(lease)
+    }
+
+    /// Native read-only process inventory; bounded independently of status.
+    fn owned_process_unique() -> Result<(), &'static str> {
+        let script = r#"
+$ErrorActionPreference = 'Stop'
+try {
+  $p = @(Get-CimInstance Win32_Process -Filter "Name='sing-box.exe'" -ErrorAction Stop)
+  if ($p.Count -ne 1) { exit 7 }
+  if (-not $p[0].ExecutablePath -or $p[0].ExecutablePath -ine $env:INTERNET_RECOVERY_EXE) { exit 8 }
+  if (-not $p[0].CommandLine -or
+    $p[0].CommandLine.IndexOf($env:INTERNET_RECOVERY_CONFIG, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { exit 9 }
+  exit 0
+} catch [System.UnauthorizedAccessException] { exit 5 }
+catch { exit 6 }
+"#;
+        let mut child = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .env("INTERNET_RECOVERY_EXE", config::binary())
+            .env("INTERNET_RECOVERY_CONFIG", config::installed())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| "RECOVERY_PROCESS_READBACK_UNAVAILABLE")?;
+        let deadline = Instant::now() + Duration::from_secs(4);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return match status.code() {
+                        Some(0) => Ok(()),
+                        Some(5) => Err("RECOVERY_PROCESS_ACCESS_DENIED"),
+                        Some(7) | Some(8) | Some(9) => Err("RECOVERY_PROCESS_OWNER_UNCONFIRMED"),
+                        _ => Err("RECOVERY_PROCESS_READBACK_FAILED"),
+                    };
+                }
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("RECOVERY_PROCESS_READBACK_TIMEOUT");
+                }
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("RECOVERY_PROCESS_READBACK_FAILED");
+                }
+            }
+        }
+    }
+
+    fn recovery_native_gate(config: &Value) -> Result<(), &'static str> {
+        if !is_running()? {
+            return Err("RECOVERY_MANUAL_STOP_HONORED");
+        }
+        // Never take a Task/process from another owner or a saved-but-down TUN.
+        owned_process_unique()?;
+        native_check(&crate::config::installed())?;
+        let state = tun::status()?;
+        if state["managed_tun"] != true
+            || state["native_tun_up"] != true
+            || state["desired_native_match"] != true
+            || state["native_tun_configured"] != true
+        {
+            return Err("RECOVERY_TUN_NATIVE_DRIFT");
+        }
+        let configured = crate::config::selected(config, Target::Desktop)?;
+        if !configured.tag().starts_with("direct-") {
+            return Err("RECOVERY_DIRECT_VM_IPV4_REQUIRED");
+        }
+        // A regular Windows start may normalize an obsolete WSL interface
+        // binding. That is not authorized by a guarded network restart.
+        // Check the exact startup candidate before ending the live Task.
+        let startup = crate::wsl::windows_start_config(config)?;
+        super::recovery_restart_config_stable(config, &startup)?;
+        if selector::runtime_selected(Target::Desktop)? != configured {
+            return Err("RECOVERY_DESKTOP_SELECTOR_DRIFT");
+        }
+        // Do not mutate while remote control is using the same TUN; a shared
+        // destination IP does not prove control path independence.
+        tun::recovery_control_independent()
+            .map_err(|_| "RECOVERY_CONTROL_INDEPENDENCE_UNPROVEN")?;
+        tun::recovery_selected_apps_quiescent()
+    }
+
+    /// Explicitly called by one CLI/menu operation; never from status/diagnose,
+    /// Task Scheduler restart-on-failure or an unvalidated network event.
+    pub fn recover(check_only: bool) -> Result<Value, &'static str> {
+        let original = config::read(&config::installed())?;
+        recovery_native_gate(&original)?;
+        let first = diagnostic::selected_desktop_egress(
+            original.clone(),
+            Instant::now() + Duration::from_secs(8),
+        );
+        let repeated_timeout = first.verdict == egress::Verdict::Unknown
+            && first.reason == "HTTPS_DEADLINE_OR_TIMEOUT";
+        let proof = if repeated_timeout {
+            diagnostic::selected_desktop_egress(
+                original.clone(),
+                Instant::now() + Duration::from_secs(8),
+            )
+        } else {
+            first.clone()
+        };
+        let eligible = recovery_eligible(
+            &proof,
+            repeated_timeout && proof.reason == "HTTPS_DEADLINE_OR_TIMEOUT",
+        )?;
+        if check_only || !eligible {
+            return Ok(
+                json!({"ok":true,"changed":false,"eligible_for_one_recovery":eligible,
+                "pre_https_reason":proof.reason,"pre_https_verdict":format!("{:?}",proof.verdict).to_uppercase(),
+                "control":"INDEPENDENT_PHYSICAL_ROUTE_READBACK",
+                "task":"OWNED_RUNNING","tun":"CONFIGURED_UP",
+                "autonomous_interface_event":"UNSUPPORTED_NOT_PROVEN",
+                "next_action":if eligible {"internet recover (explicit one-shot restart, may interrupt TUN traffic)"}
+                    else {"No restart needed; native VM HTTPS already confirmed"}}),
+            );
+        }
+        let _lease = recovery_lease()?;
+        // Preflight again under the single-flight guard to reject concurrent
+        // configuration/Task changes. No additional network probe is needed.
+        if config::read(&config::installed())? != original {
+            return Err("RECOVERY_CONFIG_CHANGED_BEFORE_ACTION");
+        }
+        recovery_native_gate(&original)?;
+        if let Err(_) = stop() {
+            // Restore task enablement only if the owned process is still live;
+            // do not start an unknown or deliberately stopped process.
+            if is_running() == Ok(true) {
+                let _ = enable_task();
+            }
+            return Err("RECOVERY_STOP_UNCONFIRMED");
+        }
+        start().map_err(|_| "RECOVERY_START_UNCONFIRMED")?;
+        let actual = config::read(&config::installed())?;
+        if actual != original {
+            return Err("RECOVERY_CONFIG_CHANGED_POST_ACTION");
+        }
+        recovery_native_gate(&actual).map_err(|_| "RECOVERY_NATIVE_POSTCHECK_FAILED")?;
+        let post =
+            diagnostic::selected_desktop_egress(actual, Instant::now() + Duration::from_secs(9));
+        if post.verdict != egress::Verdict::Pass || post.reason != "DIRECT_PUBLIC_IP_CONFIRMED" {
+            return Err("RECOVERY_POST_HTTPS_VM_IPV4_UNCONFIRMED");
+        }
+        Ok(json!({"ok":true,"changed":true,"restart_attempts":1,
+            "pre_https_reason":proof.reason,"post_https_reason":post.reason,
+            "http":"HTTPS_200","egress":"EXPECTED_VM_IPV4_CONFIRMED",
+            "tun":"CONFIGURED_UP","control":"INDEPENDENT_PHYSICAL_ROUTE_READBACK",
+            "autonomous_interface_event":"UNSUPPORTED_NOT_PROVEN",
+            "scope":"native_desktop_proxy_ipv4_https_only_not_per_app_dns_udp_ipv6",
+            "next_action":"Run independent Chrome/other-app physical HTTPS tests; record acceptance in #8"}))
+    }
     fn command(bin: &str, args: &[&str]) -> Result<std::process::Output, &'static str> {
         Command::new(bin)
             .args(args)
@@ -340,7 +553,12 @@ mod native {
     }
 }
 #[cfg(windows)]
-pub use native::{is_running, native_check, restart, start, stop, sync_wsl};
+pub use native::{is_running, native_check, recover, restart, start, stop, sync_wsl};
+
+#[cfg(not(windows))]
+pub fn recover(_: bool) -> Result<serde_json::Value, &'static str> {
+    Err("WINDOWS_ONLY")
+}
 
 #[cfg(not(windows))]
 pub fn is_running() -> Result<bool, &'static str> {
@@ -422,6 +640,60 @@ mod tests {
         assert_eq!(
             scheduler_error(0x8004131f_u32 as i32),
             "TASK_READBACK_FAILED"
+        );
+    }
+    #[test]
+    fn recovery_decision_is_fail_closed_and_never_uses_tls_or_unknown_as_permission() {
+        use crate::egress::{Proof, Verdict};
+        let probe = |verdict, reason| Proof { verdict, reason };
+        assert_eq!(
+            recovery_eligible(&probe(Verdict::Pass, "DIRECT_PUBLIC_IP_CONFIRMED"), false),
+            Ok(false)
+        );
+        assert_eq!(
+            recovery_eligible(&probe(Verdict::Failed, "HTTPS_CONNECT_FAILED"), false),
+            Ok(true)
+        );
+        assert_eq!(
+            recovery_eligible(
+                &probe(Verdict::Failed, "CURL_SOURCE_ADDRESS_UNAVAILABLE_OBSERVED"),
+                false
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            recovery_eligible(&probe(Verdict::Unknown, "HTTPS_DEADLINE_OR_TIMEOUT"), false),
+            Err("RECOVERY_CAUSE_UNVERIFIED_NO_MUTATION")
+        );
+        assert_eq!(
+            recovery_eligible(&probe(Verdict::Unknown, "HTTPS_DEADLINE_OR_TIMEOUT"), true),
+            Ok(true)
+        );
+        for reason in [
+            "TLS_CERTIFICATE_REJECTED",
+            "HTTPS_STATUS_NOT_SUCCESS",
+            "DIRECT_IP_MISMATCH",
+            "PROXY_AUTH_REJECTED",
+        ] {
+            assert_eq!(
+                recovery_eligible(&probe(Verdict::Failed, reason), true),
+                Err("RECOVERY_CAUSE_UNVERIFIED_NO_MUTATION")
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_refuses_startup_config_migration_before_stopping_task() {
+        let installed =
+            serde_json::json!({"inbounds": [], "endpoints": [{"bind_interface":"old-wsl"}]});
+        assert_eq!(
+            recovery_restart_config_stable(&installed, &installed),
+            Ok(())
+        );
+        let normalized = serde_json::json!({"inbounds": [], "endpoints": [{}]});
+        assert_eq!(
+            recovery_restart_config_stable(&installed, &normalized),
+            Err("RECOVERY_START_WOULD_REWRITE_CONFIG")
         );
     }
 }
