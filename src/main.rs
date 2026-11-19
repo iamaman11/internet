@@ -133,7 +133,7 @@ fn apply_route(target: Target, raw: &str) -> Result<Value, &'static str> {
     let running = match lifecycle::is_running() {
         Ok(v) => v,
         Err("WINDOWS_ONLY") => return Err("WINDOWS_ONLY"),
-        Err(_) => return Err("TASK_READBACK_UNKNOWN"),
+        Err(reason) => return Err(reason),
     };
     selector::select(&config::installed(), target, route, running)?;
     Ok(
@@ -477,6 +477,18 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
                         "Inspect Windows sing-box task and Ubuntu routes before attempting any further change"
                     } else if code == "TASK_PROCESS_NOT_RUNNING" {
                         "INTERNET-SingBox: Task Scheduler did not report a running owned process after start; inspect exact task and native sing-box process"
+                    } else if code == "CONFIG_ACCESS_DENIED" {
+                        "Run the same command in an elevated terminal; do not change C:\\internet\\config permissions"
+                    } else if code == "CONFIG_NOT_CONFIGURED" {
+                        "Native configuration was not found; verify the installed release and provision using the supported configure command"
+                    } else if code == "CONFIG_JSON_INVALID" || code == "CONFIG_READ_FAILED" {
+                        "Inspect the exact protected native configuration in an elevated terminal; do not overwrite it blindly"
+                    } else if code == "TASK_ACCESS_DENIED" || code == "TASK_XML_READBACK_FAILED" {
+                        "Run the same command in an elevated terminal and inspect INTERNET-SingBox ownership; do not change task ACLs"
+                    } else if code == "TASK_NOT_INSTALLED" {
+                        "The owned INTERNET-SingBox task was not found; install the verified GitHub release, without starting a foreign sing-box"
+                    } else if code == "TASK_READBACK_FAILED" || code == "TASK_COM_CONNECT_FAILED" {
+                        "Inspect the Task Scheduler service and exact owned task; do not assume STOPPED"
                     } else if code == "SING_BOX_API_UNREACHABLE" || code == "SING_BOX_API_DEADLINE_EXCEEDED" {
                         "INTERNET-SingBox is running but the Desktop selector API is not ready; inspect native 127.0.0.1:9090 before changing Windows or WSL routes"
                     } else if code == "SING_BOX_SELECTOR_READBACK_INVALID" {
@@ -496,6 +508,11 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
             {
                 2
             } else if code == "TASK_READBACK_UNKNOWN"
+                || code == "TASK_ACCESS_DENIED"
+                || code == "TASK_XML_READBACK_FAILED"
+                || code == "TASK_READBACK_FAILED"
+                || code == "CONFIG_ACCESS_DENIED"
+                || code == "CONFIG_READ_FAILED"
                 || code == "SING_BOX_API_UNREACHABLE"
                 || code == "S4_INDEPENDENT_CONTROL_NOT_VERIFIED"
                 || code == "TUN_STATE_INTERRUPTED"
@@ -543,7 +560,7 @@ fn print_proxy_list(v: &Value) {
             );
         }
     }
-    println!("Credentials: Local Secret Vault (one login/password for all six).");
+    println!("Credentials: protected native sing-box runtime config (one account for all six).");
     println!("For HTTPS always use the DNS name shown, not the IP address.");
 }
 fn print_proxy_tests(v: &Value) {
@@ -557,7 +574,7 @@ fn print_proxy_tests(v: &Value) {
                 x["port"],
                 x["status"].as_str().unwrap_or("-"),
                 x["exit_ip"].as_str().unwrap_or("-"),
-                x["duration_ms"],
+                x["duration_ms"].as_u64().unwrap_or(0),
                 x["reason_code"].as_str().unwrap_or("-")
             );
         }
@@ -780,7 +797,7 @@ fn menu_proxies() -> Option<Vec<String>> {
     println!("=== PROXY SETTINGS AND TESTS ===");
     println!("1. Addresses and ports");
     println!("2. Credentials (local terminal only)");
-    println!("3. Test six proxies (real HTTPS; WSL Vault credentials remain private)");
+    println!("3. Test six proxies (native Windows HTTPS; no Ubuntu dependency)");
     println!("0. Back (Enter = back)");
     match read_choice("Proxy action: ")?.as_str() {
         "1" => Some(vec!["proxies".into(), "list".into()]),

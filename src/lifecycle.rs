@@ -1,7 +1,21 @@
 //! Task Scheduler is the single native lifecycle owner. No daemon/supervisor.
+#[cfg(any(windows, test))]
+use crate::model::NativeReadFailure;
 #[cfg(windows)]
 use crate::{TASK, config};
 use std::path::Path;
+
+// Win32 and Task Scheduler use invariant numeric HRESULTs; never parse
+// localized schtasks/PowerShell error text to infer that a task is absent.
+#[cfg(any(windows, test))]
+fn scheduler_error(code: i32) -> &'static str {
+    let category = match code as u32 {
+        0x80070002 | 0x8004130f => NativeReadFailure::NotFound,
+        0x80070005 => NativeReadFailure::AccessDenied,
+        _ => NativeReadFailure::Failed,
+    };
+    category.task_code()
+}
 
 #[cfg(any(windows, test))]
 fn task_state_running(state: i32) -> Result<bool, &'static str> {
@@ -53,7 +67,14 @@ mod native {
     fn task_receipt() -> Result<Option<String>, &'static str> {
         let o = command("schtasks.exe", &["/Query", "/TN", TASK, "/XML"])?;
         if !o.status.success() {
-            return Ok(None);
+            // A failed /Query is NOT proof that a task is missing. Ask native
+            // COM for the invariant missing/denied error; do not guess from
+            // exit code 1 or translated stderr.
+            return match task_com_state() {
+                Ok(None) => Ok(None),
+                Ok(Some(_)) => Err("TASK_XML_READBACK_FAILED"),
+                Err(reason) => Err(reason),
+            };
         }
         let text = String::from_utf8_lossy(&o.stdout).into_owned();
         if !task_owned(&text) {
@@ -61,10 +82,7 @@ mod native {
         }
         Ok(Some(text))
     }
-    pub fn is_running() -> Result<bool, &'static str> {
-        if task_receipt()?.is_none() {
-            return Ok(false);
-        }
+    fn task_com_state() -> Result<Option<i32>, &'static str> {
         // The scheduler's COM State is an invariant integer enum, not
         // localized PowerShell output. The existing XML receipt verifies owner.
         use windows::{
@@ -103,9 +121,27 @@ mod native {
                 .and_then(|_| service.GetFolder(&BSTR::from("\\")))
                 .and_then(|folder| folder.GetTask(&BSTR::from(TASK)))
         }
-        .map_err(|_| "TASK_READBACK_FAILED")?;
-        let state = unsafe { task.State() }.map_err(|_| "TASK_READBACK_FAILED")?;
-        super::task_state_running(state.0)
+        .map(Some)
+        .or_else(|err| {
+            if scheduler_error(err.code().0) == "TASK_NOT_INSTALLED" {
+                Ok(None)
+            } else {
+                Err(scheduler_error(err.code().0))
+            }
+        })?;
+        match task {
+            Some(task) => unsafe { task.State() }
+                .map(|state| Some(state.0))
+                .map_err(|err| scheduler_error(err.code().0)),
+            None => Ok(None),
+        }
+    }
+    pub fn is_running() -> Result<bool, &'static str> {
+        if task_receipt()?.is_none() {
+            return Err("TASK_NOT_INSTALLED");
+        }
+        let state = task_com_state()?.ok_or("TASK_NOT_INSTALLED")?;
+        super::task_state_running(state)
     }
     pub fn native_check(path: &Path) -> Result<(), &'static str> {
         let o = Command::new(config::binary())
@@ -377,5 +413,15 @@ mod tests {
         for v in [-1, 0, 5] {
             assert_eq!(task_state_running(v), Err("TASK_STATE_UNKNOWN"));
         }
+    }
+    #[test]
+    fn scheduler_native_error_categories_are_not_localized() {
+        assert_eq!(scheduler_error(0x8004130f_u32 as i32), "TASK_NOT_INSTALLED");
+        assert_eq!(scheduler_error(0x80070002_u32 as i32), "TASK_NOT_INSTALLED");
+        assert_eq!(scheduler_error(0x80070005_u32 as i32), "TASK_ACCESS_DENIED");
+        assert_eq!(
+            scheduler_error(0x8004131f_u32 as i32),
+            "TASK_READBACK_FAILED"
+        );
     }
 }

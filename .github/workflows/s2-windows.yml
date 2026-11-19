@@ -1,7 +1,8 @@
 name: S2 Windows candidate
 
-# Compile an immutable candidate from exact PR head. Publishing a GitHub
-# pre-release only delivers test binaries; it never deploys or touches Windows.
+# PRs run scoped Linux/Windows tests without release builds or packaging.
+# The immutable release candidate and native installer matrix are explicitly
+# dispatched once after both implementation slices are ready.
 on:
   workflow_dispatch:
   pull_request:
@@ -40,7 +41,25 @@ jobs:
       - name: Native pinned sing-box configuration validation
         run: python3 windows/tests/check_native.py
 
+  windows-scoped:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Rust stable MSVC
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Native Windows unit and negative tests (no package build)
+        shell: pwsh
+        run: |
+          cargo test --locked --target x86_64-pc-windows-msvc --all-targets
+          if ($LASTEXITCODE -ne 0) { throw 'WINDOWS_SCOPED_TEST_FAILED' }
+
   windows-package:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 15
     needs: linux-contract

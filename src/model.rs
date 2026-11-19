@@ -1,6 +1,45 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 
+/// Native readback failures never become a fabricated absent/stopped state.
+/// Boundary-specific reason codes are generated from this one vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeReadFailure {
+    NotFound,
+    AccessDenied,
+    Invalid,
+    Failed,
+}
+
+impl NativeReadFailure {
+    pub fn from_io(error: &std::io::Error) -> Self {
+        match error.kind() {
+            std::io::ErrorKind::NotFound => Self::NotFound,
+            std::io::ErrorKind::PermissionDenied => Self::AccessDenied,
+            std::io::ErrorKind::InvalidData => Self::Invalid,
+            _ => Self::Failed,
+        }
+    }
+
+    pub fn config_code(self) -> &'static str {
+        match self {
+            Self::NotFound => "CONFIG_NOT_CONFIGURED",
+            Self::AccessDenied => "CONFIG_ACCESS_DENIED",
+            Self::Invalid => "CONFIG_JSON_INVALID",
+            Self::Failed => "CONFIG_READ_FAILED",
+        }
+    }
+
+    pub fn task_code(self) -> &'static str {
+        match self {
+            Self::NotFound => "TASK_NOT_INSTALLED",
+            Self::AccessDenied => "TASK_ACCESS_DENIED",
+            Self::Invalid => "TASK_STATE_UNKNOWN",
+            Self::Failed => "TASK_READBACK_FAILED",
+        }
+    }
+}
+
 pub const ROUTES: [&str; 6] = [
     "direct-auto",
     "direct-hysteria2",
@@ -144,5 +183,36 @@ mod tests {
         assert_eq!(d.health, Health::Unknown);
         assert!(d.observed_at.is_none());
         assert_eq!(d.source, "none");
+    }
+    #[test]
+    fn native_failure_vocabulary_preserves_missing_denied_invalid_and_failed() {
+        use std::io::{Error, ErrorKind};
+        let cases = [
+            (
+                ErrorKind::NotFound,
+                "CONFIG_NOT_CONFIGURED",
+                "TASK_NOT_INSTALLED",
+            ),
+            (
+                ErrorKind::PermissionDenied,
+                "CONFIG_ACCESS_DENIED",
+                "TASK_ACCESS_DENIED",
+            ),
+            (
+                ErrorKind::InvalidData,
+                "CONFIG_JSON_INVALID",
+                "TASK_STATE_UNKNOWN",
+            ),
+            (
+                ErrorKind::Other,
+                "CONFIG_READ_FAILED",
+                "TASK_READBACK_FAILED",
+            ),
+        ];
+        for (kind, config, task) in cases {
+            let failure = NativeReadFailure::from_io(&Error::from(kind));
+            assert_eq!(failure.config_code(), config);
+            assert_eq!(failure.task_code(), task);
+        }
     }
 }
