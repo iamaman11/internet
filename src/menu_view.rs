@@ -116,6 +116,8 @@ pub fn wsl_state_lines(v: &Value) -> Vec<String> {
     let mut lines = vec![
         format!("WSL network:      {}", val("network")),
         format!("WireGuard:        {}", val("state")),
+        format!("Saved WSL state:   {}", val("desired_state")),
+        format!("Auto at boot:      {}", val("boot_hook")),
         format!("Route selected:   {}", val("route")),
         format!("Guest IPv4:       {}", gval("guest_ipv4")),
         format!("Handshake:        {}", yes(v, "handshake_observed")),
@@ -128,6 +130,11 @@ pub fn wsl_state_lines(v: &Value) -> Vec<String> {
         ),
         "Public IPv4:      NOT TESTED by status (run WSL Diagnose)".to_owned(),
     ];
+    if v["boot_restore_in_progress"] == true {
+        lines.push("Boot restore:     IN PROGRESS (one shot; no Windows restart)".to_owned());
+    } else if let Some(reason) = v["last_boot_restore"]["reason_code"].as_str() {
+        lines.push(format!("Last boot restore: {}", reason));
+    }
     if val("state") != "ON" {
         lines.push(format!("Next: {}", val("next_action")));
     }

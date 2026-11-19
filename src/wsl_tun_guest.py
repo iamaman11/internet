@@ -284,10 +284,11 @@ def main():
     else:
         raise RuntimeError("WSL_WG_ACTION_INVALID")
 
-try:
-    main()
-except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
-    # Never relay arbitrary stderr, private keys or tool internals.
-    code = str(error) if isinstance(error, RuntimeError) else "WSL_NATIVE_IO_FAILED"
-    print(json.dumps({"ok": False, "reason_code": code}))
-    sys.exit(4)
+if __name__ == "__main__":
+    try:
+        main()
+    except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
+        # Never relay arbitrary stderr, private keys or tool internals.
+        code = str(error) if isinstance(error, RuntimeError) else "WSL_NATIVE_IO_FAILED"
+        print(json.dumps({"ok": False, "reason_code": code}))
+        sys.exit(4)

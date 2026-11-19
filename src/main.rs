@@ -478,6 +478,12 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
                         "WSL Windows WireGuard endpoint is absent or its peer differs; Windows sing-box/TUN/MCP unchanged. Inspect exact endpoint and configure separately, then retry WSL ON"
                     } else if code == "WSL_TUN_GUEST_OWNER_CONFLICT" {
                         "Inspect Ubuntu interface, rules and DNS; do not remove unidentified resources"
+                    } else if code == "WSL_BOOT_RESTORE_IN_PROGRESS" {
+                        "Ubuntu boot is restoring its own TUN once; wait for bounded completion, then run internet wsl tun status"
+                    } else if code == "WSL_BOOT_OWNER_CONFLICT" || code == "WSL_BOOT_HOOK_NOT_READY" {
+                        "Foreign or invalid Ubuntu /etc/wsl.conf boot command; inspect exact owner without overwriting it"
+                    } else if code.starts_with("WSL_BOOT_") {
+                        "Inspect internet wsl tun status and Ubuntu boot owner; Windows TUN, Task and WindowsAdminMCP were not restarted"
                     } else if code == "WSL_WG_FIREWALL_OWNER_CONFLICT" {
                         "INTERNET-WSL-WG-43913: rule identity or WSL interface ownership conflicts. Check exact rule and current vEthernet (WSL) adapter; no broad firewall change"
                     } else if code == "WSL_WG_FIREWALL_RECONFIGURATION_REQUIRED" {

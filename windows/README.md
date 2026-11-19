@@ -55,3 +55,34 @@ Windows host, native Task Scheduler works after CLI exit, each route's egress
 and selectors are verified, repeat install NOOP, failed update rolls back,
 Vault-backed scoped restore succeeds, and OpenAI control stays connected.
 Actual clean Windows reinstall on a second host remains NOT_TESTED.
+
+## WSL WireGuard desired state after Ubuntu restart
+
+After updating the verified Windows `internet.exe`, a successful
+`internet wsl tun on` installs INTERNET's one-shot Ubuntu boot hook and saves
+`desired_state=ON` only **after** a real handshake, guest routes/DNS/IPv6
+readback and native HTTPS egress verification. Repeating ON against an already
+verified live tunnel also arms boot restoration, without rebuilding Windows.
+`internet wsl tun off` persists `desired_state=OFF` first; OFF survives a
+subsequent Ubuntu restart.
+
+Only the INTERNET-owned `[boot] command` entry in `/etc/wsl.conf` is added;
+an existing foreign boot command is a hard conflict, not overwritten. The
+boot hook invokes a detached, bounded **one-shot** Ubuntu process using the
+same native guest WireGuard implementation. It creates no new service,
+Windows Task Scheduler task, Windows sing-box, controller, or secret store.
+The current `systemd=true` and DNS policy are preserved.
+
+On cold Ubuntu boot the one-shot action reads the existing native Windows
+endpoint/peer and WSL selection without modifying them, verifies current NAT
+peer identity and DNS ownership, probes a real WireGuard handshake, applies
+only its owned Ubuntu routes, and requires IPv4 HTTPS (matching the configured
+VM address for DIRECT). Failures leave Ubuntu NAT unchanged, or roll back
+owned changes. No silent Windows restart, firewall change, WSL instance
+shutdown, or repeated background retry occurs. Check the separate saved
+state, actual live state and last boot result using `internet wsl tun status
+--json`; a saved ON alone is **not** a physical egress proof.
+
+Changes to the Linux boot policy take effect at the **next natural Ubuntu
+start**. Installing an EXE does not start or terminate Ubuntu. The first
+successful explicit ON with the updated EXE is the one-time hook enrollment.
