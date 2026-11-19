@@ -901,6 +901,12 @@ pub fn app_diagnose(raw: &str) -> Result<Value, &'static str> {
 
 #[cfg(windows)]
 fn control_endpoints() -> Result<Vec<Ipv4Addr>, &'static str> {
+    use std::{
+        io::Read,
+        process::Stdio,
+        thread,
+        time::{Duration, Instant},
+    };
     // Distinct IP addresses do not prove independent routing: the Windows
     // Admin MCP control endpoint may legitimately be the same Vultr VM as
     // the data plane. Verify the established control socket uses the native
@@ -924,18 +930,51 @@ foreach ($socket in $sockets) {
     $socket.RemoteAddress
 }
 "#;
-    let out = std::process::Command::new("powershell.exe")
+    let mut child = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .map_err(|_| "TUN_CONTROL_QUERY_FAILED")?;
-    if !out.status.success() {
-        return Err(if out.status.code() == Some(9) {
-            "TUN_CONTROL_ROUTE_NOT_DIRECT"
-        } else {
-            "TUN_CONTROL_NOT_CONNECTED"
-        });
-    }
-    let text = String::from_utf8(out.stdout).map_err(|_| "TUN_CONTROL_QUERY_FAILED")?;
+    let deadline = Instant::now() + Duration::from_millis(3500);
+    let output = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return Err(if status.code() == Some(9) {
+                        "TUN_CONTROL_ROUTE_NOT_DIRECT"
+                    } else {
+                        "TUN_CONTROL_NOT_CONNECTED"
+                    });
+                }
+                let mut output = Vec::new();
+                child
+                    .stdout
+                    .take()
+                    .ok_or("TUN_CONTROL_QUERY_FAILED")?
+                    .take(1025)
+                    .read_to_end(&mut output)
+                    .map_err(|_| "TUN_CONTROL_QUERY_FAILED")?;
+                if output.len() > 1024 {
+                    return Err("TUN_CONTROL_QUERY_FAILED");
+                }
+                break output;
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("TUN_CONTROL_QUERY_TIMEOUT");
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("TUN_CONTROL_QUERY_FAILED");
+            }
+        }
+    };
+    let text = String::from_utf8(output).map_err(|_| "TUN_CONTROL_QUERY_FAILED")?;
     let mut ips = Vec::new();
     for line in text.lines() {
         let ip: Ipv4Addr = line.trim().parse().map_err(|_| "TUN_CONTROL_IP_UNSAFE")?;
@@ -954,6 +993,14 @@ foreach ($socket in $sockets) {
 #[cfg(not(windows))]
 fn control_endpoints() -> Result<Vec<Ipv4Addr>, &'static str> {
     Err("WINDOWS_ONLY")
+}
+
+/// A recovery may interrupt the owned dataplane only if the existing native
+/// WindowsAdminMCP control socket is independently routed over the physical
+/// interface. A shared remote VM address alone is insufficient proof.
+#[cfg(windows)]
+pub(crate) fn recovery_control_independent() -> Result<(), &'static str> {
+    control_endpoints().map(|_| ())
 }
 
 #[cfg(windows)]

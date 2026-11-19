@@ -392,6 +392,8 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         }
         ("wsl", ["wsl", "sync"]) => lifecycle::sync_wsl()
             .map(|_| json!({"ok":true,"observed":"wsl-bound","next_action":"internet start"})),
+        ("recover", ["recover", "check"]) => lifecycle::recover(true),
+        ("recover", ["recover"]) => lifecycle::recover(false),
         ("start", ["start"]) => lifecycle::start()
             .map(|_| json!({"ok":true,"owner":"Windows Task Scheduler","observed":"running"})),
         ("stop", ["stop"]) => lifecycle::stop()
@@ -404,7 +406,7 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
         ("help", _) | ("--help", _) => Ok(
             json!({"version":env!("CARGO_PKG_VERSION"),"commands":["status [--deep]","tree","inspect <id>","diagnose [id]",
             "route <direct-auto|direct-hysteria2|direct-vless|warp-auto|warp-hysteria2|warp-vless>",
-            "wsl route <same>","wsl tun <on|off|status|diagnose>","wsl tun dns setup (one-time native Ubuntu setup)","wsl sync (offline attach)","start","stop","restart","configure --stdin",
+             "wsl route <same>","wsl tun <on|off|status|diagnose>","wsl tun dns setup (one-time native Ubuntu setup)","wsl sync (offline attach)","start","stop","restart","recover check (read-only)","recover (guarded one-shot restart)","configure --stdin",
             "backup export <external-directory>","restore <external-directory>",
              "windows-mode <normal|selected|all|status>",
              "tun <status|on|off>","selected-apps <status|on|off|add EXE|remove EXE>",
@@ -492,6 +494,20 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
                         "INTERNET-SingBox: Task Scheduler did not report a running owned process after start; inspect exact task and native sing-box process"
                     } else if code == "CONFIG_ACCESS_DENIED" {
                         "Run the same command in an elevated terminal; do not change C:\\internet\\config permissions"
+                    } else if code == "RECOVERY_CONTROL_INDEPENDENCE_UNPROVEN" {
+                        "Recovery refused: WindowsAdminMCP physical control route not independently verified; inspect control without stopping sing-box"
+                    } else if code == "RECOVERY_MANUAL_STOP_HONORED" {
+                        "The owned task is not running; deliberate STOP is honored and recover will not activate it"
+                    } else if code == "RECOVERY_TUN_NATIVE_DRIFT" || code == "RECOVERY_DESKTOP_SELECTOR_DRIFT" {
+                        "Inspect exact owned TUN/config/selector readback; refuse restart while state disagrees"
+                    } else if code == "RECOVERY_DIRECT_VM_IPV4_REQUIRED" {
+                        "Recovery requires an already selected DIRECT route to verify the configured VM IPv4; no selector is changed automatically"
+                    } else if code == "RECOVERY_CAUSE_UNVERIFIED_NO_MUTATION" {
+                        "No safe local restart indication (TLS/HTTP/IP/unknown); run deep diagnosis and check VM/network independently"
+                    } else if code == "RECOVERY_ALREADY_RUNNING_OR_INTERRUPTED" {
+                        "A recovery.inprogress guard exists in owned config; inspect prior recovery before removing it manually"
+                    } else if code.starts_with("RECOVERY_") {
+                        "Recovery is unconfirmed or was refused; inspect owned Task, TUN, independent MCP, native config and real HTTPS before another explicit attempt"
                     } else if code == "CONFIG_NOT_CONFIGURED" {
                         "Native configuration was not found; verify the installed release and provision using the supported configure command"
                     } else if code == "CONFIG_JSON_INVALID" || code == "CONFIG_READ_FAILED" {
@@ -1029,11 +1045,17 @@ fn menu() -> i32 {
                 println!("1. Start managed sing-box (safe if already running)");
                 println!("2. Stop sing-box (interrupts TUN and may disconnect MCP)");
                 println!("3. Restart sing-box (interrupts connections and may disconnect MCP)");
+                println!("4. Inspect guarded recovery eligibility (read-only)");
+                println!(
+                    "5. Recover once only if native ownership, HTTPS fault and independent control are verified"
+                );
                 println!("0. Back (Enter = back)");
                 read_choice("Action: ").map(|v| match v.as_str() {
                     "1" => vec!["start".into()],
                     "2" => vec!["stop".into()],
                     "3" => vec!["restart".into()],
+                    "4" => vec!["recover".into(), "check".into()],
+                    "5" => vec!["recover".into()],
                     "0" | "" => vec![],
                     _ => vec!["invalid".into()],
                 })

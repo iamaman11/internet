@@ -310,7 +310,10 @@ fn native_vm(config: &serde_json::Value) -> Option<std::net::Ipv4Addr> {
         .parse()
         .ok()
 }
-fn selected_desktop_egress(config: serde_json::Value, deadline: Instant) -> egress::Proof {
+pub(crate) fn selected_desktop_egress(
+    config: serde_json::Value,
+    deadline: Instant,
+) -> egress::Proof {
     let Some(vm) = native_vm(&config) else {
         return egress::Proof {
             verdict: egress::Verdict::Unknown,

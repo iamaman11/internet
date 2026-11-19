@@ -6,7 +6,8 @@ name: S2 Windows candidate
 on:
   workflow_dispatch:
   pull_request:
-    branches: [main]
+    # Slice B reviews against the verified A branch until A is merged.
+    branches: [main, feat/r181-windows-diagnostic-truth]
     paths:
       - 'Cargo.*'
       - 'src/**'
