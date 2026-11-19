@@ -1,5 +1,5 @@
 //! One native sing-box JSON is the configuration owner. No second selector DB.
-use crate::model::{ROUTES, Route, Target};
+use crate::model::{NativeReadFailure, ROUTES, Route, Target};
 use serde_json::Value;
 use std::{
     fs,
@@ -246,7 +246,7 @@ fn with_wsl_listen(original: &Value, address: std::net::Ipv4Addr) -> Result<Valu
     Ok(next)
 }
 pub fn read(path: &Path) -> Result<Value, &'static str> {
-    let raw = fs::read(path).map_err(|_| "CONFIG_NOT_CONFIGURED")?;
+    let raw = fs::read(path).map_err(|e| NativeReadFailure::from_io(&e).config_code())?;
     let parsed: Value = serde_json::from_slice(&raw).map_err(|_| "CONFIG_JSON_INVALID")?;
     validate(&parsed)?;
     Ok(parsed)
@@ -379,6 +379,23 @@ mod tests {
         let mut bad = next.clone();
         bad["inbounds"][1].as_object_mut().unwrap().remove("users");
         assert_eq!(validate(&bad), Err("CONFIG_WSL_AUTH_REQUIRED"));
+    }
+    #[test]
+    fn missing_and_malformed_config_readback_are_distinct() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "internet-config-read-{}-{suffix}.json",
+            std::process::id()
+        ));
+        assert_eq!(read(&path).unwrap_err(), "CONFIG_NOT_CONFIGURED");
+        std::fs::write(&path, b"{invalid").unwrap();
+        assert_eq!(read(&path).unwrap_err(), "CONFIG_JSON_INVALID");
+        std::fs::write(&path, serde_json::to_vec(&fixture()).unwrap()).unwrap();
+        assert_eq!(read(&path), Ok(fixture()));
+        std::fs::remove_file(&path).unwrap();
     }
     #[test]
     fn dead_wsl_listener_falls_back_only_to_safe_loopback() {

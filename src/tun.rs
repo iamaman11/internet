@@ -197,7 +197,13 @@ pub fn read_at(path: &Path) -> Result<Settings, &'static str> {
         }
         Ok(_) => {}
     }
-    let bytes = fs::read(path).map_err(|_| "TUN_STATE_READ_FAILED")?;
+    let bytes = fs::read(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            "TUN_STATE_ACCESS_DENIED"
+        } else {
+            "TUN_STATE_READ_FAILED"
+        }
+    })?;
     let settings: Settings =
         serde_json::from_slice(&bytes).map_err(|_| "TUN_STATE_JSON_INVALID")?;
     validate(&settings)?;
@@ -698,6 +704,147 @@ pub fn app_list() -> Result<Value, &'static str> {
     value["egress"] = json!("NOT_TESTED_BY_STATUS");
     Ok(value)
 }
+
+/// A native TCP observation describes socket ownership, not app-origin HTTPS
+/// success. Third-party loopback brokers can open shared external sockets;
+/// there is no sound reverse attribution from the target EXE alone.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct AppTcpSnapshot {
+    process_count: usize,
+    direct_tcp: usize,
+    loopback_tcp: usize,
+    intermediary_processes: Vec<String>,
+    ambiguous_ownership: bool,
+}
+
+fn app_tcp_assessment(s: &AppTcpSnapshot) -> (&'static str, &'static str, &'static str) {
+    if s.ambiguous_ownership {
+        return ("APP_SOCKET_OWNER_AMBIGUOUS", "UNKNOWN", "UNKNOWN");
+    }
+    if s.process_count == 0 {
+        return ("APP_PROCESS_NOT_RUNNING", "UNKNOWN", "NOT_TESTED");
+    }
+    if s.loopback_tcp > 0 {
+        return (
+            "APP_LOCAL_INTERMEDIARY_OR_LOOPBACK_HANDOFF",
+            "APP_AND_POSSIBLE_INTERMEDIARY",
+            "UNSUPPORTED_FOR_LOOPBACK_HANDOFF",
+        );
+    }
+    if s.direct_tcp > 0 {
+        return (
+            "APP_OWNS_EXTERNAL_TCP_EGRESS_NOT_PROVEN",
+            "TARGET_APP",
+            "NOT_TESTED",
+        );
+    }
+    ("APP_NO_ESTABLISHED_TCP", "NOT_OBSERVED", "NOT_TESTED")
+}
+
+fn desired_application_route(tun: bool, selected_mode: bool, selected: bool) -> &'static str {
+    if tun && !selected_mode {
+        "VM_ALL_APPLICATIONS"
+    } else if tun && selected {
+        "VM"
+    } else {
+        "DIRECT"
+    }
+}
+
+#[cfg(windows)]
+fn app_tcp_snapshot(exact: &str) -> Result<AppTcpSnapshot, &'static str> {
+    use std::{
+        io::Read,
+        process::{Command, Stdio},
+        thread,
+        time::{Duration, Instant},
+    };
+    // The EXE identity is passed through a child-only environment variable,
+    // not interpolated into script code or a WQL filter. Read-only queries.
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+try {
+    $target = $env:INTERNET_DIAG_EXACT_EXE
+    $leaf = [System.IO.Path]::GetFileName($target).Replace("'", "''")
+    $procs = @(Get-CimInstance Win32_Process -Filter "Name='$leaf'" -ErrorAction Stop |
+        Where-Object { $_.ExecutablePath -and $_.ExecutablePath -ieq $target })
+    $ids = @($procs | ForEach-Object { [uint32]$_.ProcessId })
+    $tcp = @(Get-NetTCPConnection -ErrorAction Stop)
+    $owned = @($tcp | Where-Object { $ids -contains $_.OwningProcess -and $_.State -eq 'Established' })
+    $direct = 0; $local = 0; $ambiguous = $false
+    $brokers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($c in $owned) {
+        $remote = $c.RemoteAddress
+        $loopback = $remote -eq '::1' -or $remote -like '127.*'
+        if (-not $loopback) { $direct++; continue }
+        $local++
+        $peers = @($tcp | Where-Object {
+            $_.LocalPort -eq $c.RemotePort -and $_.RemotePort -eq $c.LocalPort -and
+            $_.OwningProcess -ne $c.OwningProcess -and $_.State -eq 'Established'
+        })
+        if ($peers.Count -ne 1) { $ambiguous = $true; continue }
+        $peer = @(Get-CimInstance Win32_Process -Filter "ProcessId=$($peers[0].OwningProcess)" -ErrorAction Stop)
+        if ($peer.Count -eq 1 -and $peer[0].Name) { [void]$brokers.Add([string]$peer[0].Name) }
+        else { $ambiguous = $true }
+    }
+    [pscustomobject]@{process_count=$procs.Count;direct_tcp=$direct;loopback_tcp=$local;
+        intermediary_processes=@($brokers | Select-Object -First 8);ambiguous_ownership=$ambiguous} |
+        ConvertTo-Json -Compress -Depth 4
+} catch [System.UnauthorizedAccessException] { exit 5 }
+catch { exit 6 }
+"#;
+    let mut child = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("INTERNET_DIAG_EXACT_EXE", exact)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "APP_SOCKET_READBACK_UNAVAILABLE")?;
+    let deadline = Instant::now() + Duration::from_millis(3500);
+    loop {
+        match child.try_wait() {
+            Ok(Some(exit)) => {
+                if !exit.success() {
+                    return Err(if exit.code() == Some(5) {
+                        "APP_SOCKET_ACCESS_DENIED"
+                    } else {
+                        "APP_SOCKET_READBACK_FAILED"
+                    });
+                }
+                let mut data = Vec::new();
+                child
+                    .stdout
+                    .take()
+                    .ok_or("APP_SOCKET_READBACK_FAILED")?
+                    .take(8193)
+                    .read_to_end(&mut data)
+                    .map_err(|_| "APP_SOCKET_READBACK_FAILED")?;
+                if data.len() > 8192 {
+                    return Err("APP_SOCKET_READBACK_INVALID");
+                }
+                return serde_json::from_slice(&data).map_err(|_| "APP_SOCKET_READBACK_INVALID");
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("APP_SOCKET_READBACK_TIMEOUT");
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("APP_SOCKET_READBACK_FAILED");
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn app_tcp_snapshot(_: &str) -> Result<AppTcpSnapshot, &'static str> {
+    Err("WINDOWS_ONLY")
+}
+
 pub fn app_diagnose(raw: &str) -> Result<Value, &'static str> {
     if !cfg!(windows) {
         return Err("WINDOWS_ONLY");
@@ -719,16 +866,36 @@ pub fn app_diagnose(raw: &str) -> Result<Value, &'static str> {
         .applications
         .iter()
         .any(|a| a == &exact || a == executable_leaf(&exact));
+    let (socket_reason, socket_owner, strict_scope, snapshot, observed_at) =
+        match app_tcp_snapshot(&exact) {
+            Ok(s) => {
+                let (reason, owner, strict) = app_tcp_assessment(&s);
+                (
+                    reason,
+                    owner,
+                    strict,
+                    Some(serde_json::json!(s)),
+                    Some(chrono::Utc::now().to_rfc3339()),
+                )
+            }
+            Err(reason) => (reason, "UNKNOWN", "NOT_TESTED", None, None),
+        };
     Ok(
         json!({"ok":true,"application":exact,"identity_source":source,
-        "desired_route":if state.managed_tun && !state.selected_apps {"VM_ALL_APPLICATIONS"}
-            else if state.managed_tun && selected {"VM"} else {"DIRECT"},
+        "desired_route":desired_application_route(state.managed_tun, state.selected_apps, selected),
         "managed_tun":state.managed_tun,"selected_apps":state.selected_apps,
         "rule_format":if configured && hot_native(&native) {"native_hot_rule_set"}
             else if configured && state.selected_apps {"legacy_process_name"} else {"inactive"},
         "native_state":"CONFIG_AND_FILE_READBACK_ONLY",
+        "tcp_flow_reason_code":socket_reason,
+        "tcp_connection_owner":socket_owner,
+        "tcp_observation":snapshot,
+        "tcp_observed_at":observed_at,
+        "tcp_scope":"established_TCP_snapshot_only_no_UDP_DNS_IPv6_QUIC_WebRTC",
+        "effective_sing_box_outbound":"UNKNOWN_NOT_CORRELATED_TO_CONNECTION",
+        "strict_app_origin_vm_guarantee":strict_scope,
         "physical_egress":"NOT_TESTED_BY_STATUS",
-        "next_action":"Independently verify real application HTTPS egress"}),
+        "next_action":"Independently verify app-origin HTTPS egress and intermediary attribution; selection is not proof"}),
     )
 }
 
@@ -1115,6 +1282,9 @@ fn classify_tun_status(
         return (Health::Failed, "TUN_NATIVE_STATE_MISMATCH");
     }
     match task {
+        Err("TASK_NOT_INSTALLED") => (Health::Degraded, "TASK_NOT_INSTALLED"),
+        Err("TASK_ACCESS_DENIED") => (Health::Unknown, "TASK_ACCESS_DENIED"),
+        Err("TASK_XML_READBACK_FAILED") => (Health::Unknown, "TASK_XML_READBACK_FAILED"),
         Err(_) => (Health::Unknown, "TASK_READBACK_UNKNOWN"),
         Ok(false) if desired => (Health::Degraded, "SING_BOX_STOPPED_TUN_INACTIVE"),
         Ok(_) if desired == adapter_up => (Health::Healthy, "TUN_NATIVE_STATE_CONFIRMED"),
@@ -1176,6 +1346,9 @@ pub(crate) fn inspect_with_snapshot(
             d.health = Health::Unknown;
             d.reason_code = match *code {
                 "TUN_STATE_INTERRUPTED" => "TUN_STATE_INTERRUPTED",
+                "TUN_STATE_ACCESS_DENIED" | "CONFIG_ACCESS_DENIED" => "CONFIG_ACCESS_DENIED",
+                "CONFIG_NOT_CONFIGURED" => "CONFIG_NOT_CONFIGURED",
+                "CONFIG_JSON_INVALID" => "CONFIG_JSON_INVALID",
                 "TUN_STATE_JSON_INVALID" | "TUN_STATE_SCHEMA_INVALID" => "TUN_STATE_INVALID",
                 "HOT_RULESET_DRIFT" | "HOT_RULESET_NOT_FOUND" | "HOT_RULESET_INVALID" => {
                     "HOT_RULESET_DRIFT"
@@ -1498,5 +1671,46 @@ mod tests {
         let mut wrong = s;
         wrong.schema = "v2".into();
         assert_eq!(validate(&wrong), Err("TUN_STATE_SCHEMA_INVALID"));
+    }
+    #[test]
+    fn app_origin_tcp_snapshot_does_not_fabricate_route_or_socket_ownership() {
+        assert_eq!(desired_application_route(true, true, true), "VM");
+        assert_eq!(desired_application_route(true, true, false), "DIRECT");
+        assert_eq!(desired_application_route(false, true, true), "DIRECT");
+        assert_eq!(
+            desired_application_route(true, false, false),
+            "VM_ALL_APPLICATIONS"
+        );
+        let mut snapshot = AppTcpSnapshot {
+            process_count: 1,
+            direct_tcp: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            app_tcp_assessment(&snapshot),
+            (
+                "APP_OWNS_EXTERNAL_TCP_EGRESS_NOT_PROVEN",
+                "TARGET_APP",
+                "NOT_TESTED"
+            )
+        );
+        snapshot.loopback_tcp = 2;
+        snapshot.intermediary_processes = vec!["shared-broker.exe".into()];
+        assert_eq!(
+            app_tcp_assessment(&snapshot),
+            (
+                "APP_LOCAL_INTERMEDIARY_OR_LOOPBACK_HANDOFF",
+                "APP_AND_POSSIBLE_INTERMEDIARY",
+                "UNSUPPORTED_FOR_LOOPBACK_HANDOFF"
+            )
+        );
+        snapshot.ambiguous_ownership = true;
+        assert_eq!(
+            app_tcp_assessment(&snapshot),
+            ("APP_SOCKET_OWNER_AMBIGUOUS", "UNKNOWN", "UNKNOWN")
+        );
+        snapshot.process_count = 0;
+        snapshot.ambiguous_ownership = false;
+        assert_eq!(app_tcp_assessment(&snapshot).0, "APP_PROCESS_NOT_RUNNING");
     }
 }

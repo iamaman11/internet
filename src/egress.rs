@@ -63,15 +63,39 @@ pub fn verify_body(body: &str, vm: Ipv4Addr, warp: bool) -> Proof {
 }
 
 #[cfg(any(windows, test))]
-fn curl_failure(code: Option<i32>) -> Proof {
+fn curl_failure(code: Option<i32>, sanitized_classification_only: &str) -> Proof {
+    // Classify only an actually observed native curl error, never fabricate a
+    // sing-box WSAEADDRNOTAVAIL from a generic timeout. Raw stderr is discarded.
+    if sanitized_classification_only.contains("WSAEADDRNOTAVAIL")
+        || sanitized_classification_only.contains("Cannot assign requested address")
+        || sanitized_classification_only.contains("10049")
+    {
+        return Proof::new(Verdict::Failed, "CURL_SOURCE_ADDRESS_UNAVAILABLE_OBSERVED");
+    }
     match code {
+        Some(5) => Proof::new(Verdict::Failed, "PROXY_DNS_RESOLUTION_FAILED"),
+        Some(6) => Proof::new(Verdict::Failed, "HTTPS_DNS_RESOLUTION_FAILED"),
+        Some(7) => Proof::new(Verdict::Failed, "HTTPS_CONNECT_FAILED"),
         Some(28) => Proof::new(Verdict::Unknown, "HTTPS_DEADLINE_OR_TIMEOUT"),
         Some(60) => Proof::new(Verdict::Failed, "TLS_CERTIFICATE_REJECTED"),
         Some(35) => Proof::new(Verdict::Failed, "TLS_HANDSHAKE_FAILED"),
         Some(67) => Proof::new(Verdict::Failed, "PROXY_AUTH_REJECTED"),
         Some(22) => Proof::new(Verdict::Failed, "HTTPS_STATUS_NOT_SUCCESS"),
+        Some(52) => Proof::new(Verdict::Failed, "HTTPS_EMPTY_REPLY"),
+        Some(55) | Some(56) => Proof::new(Verdict::Failed, "HTTPS_TRANSPORT_INTERRUPTED"),
         _ => Proof::new(Verdict::Failed, "HTTPS_PROXY_REQUEST_FAILED"),
     }
+}
+
+#[cfg(any(windows, test))]
+fn verify_https_200(body_with_status: &str, vm: Ipv4Addr, warp: bool) -> Proof {
+    let Some((body, status)) = body_with_status.rsplit_once('\n') else {
+        return Proof::new(Verdict::Unknown, "HTTPS_STATUS_UNAVAILABLE");
+    };
+    if status.trim() != "200" {
+        return Proof::new(Verdict::Failed, "HTTPS_STATUS_NOT_SUCCESS");
+    }
+    verify_body(body, vm, warp)
 }
 
 #[cfg(windows)]
@@ -148,10 +172,12 @@ fn https_child(
             "3",
             "--max-time",
             "6",
+            "--write-out",
+            "\n%{http_code}",
             url,
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .stdin(Stdio::piped());
     if let Some(pin) = resolve {
         command.args(["--resolve", pin]);
@@ -185,6 +211,12 @@ fn https_child(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // Read a small bounded diagnostic buffer ONLY to classify the
+                // failure. Do not emit remote URL, proxy auth, or raw stderr.
+                let mut stderr = Vec::new();
+                if let Some(err) = child.stderr.take() {
+                    let _ = err.take(2048).read_to_end(&mut stderr);
+                }
                 let mut output = Vec::new();
                 if child
                     .stdout
@@ -194,13 +226,13 @@ fn https_child(
                     return Proof::new(Verdict::Unknown, "HTTPS_RESPONSE_UNAVAILABLE");
                 }
                 if !status.success() {
-                    return curl_failure(status.code());
+                    return curl_failure(status.code(), &String::from_utf8_lossy(&stderr));
                 }
                 if output.len() > 4096 {
                     return Proof::new(Verdict::Unknown, "HTTPS_RESPONSE_TOO_LARGE");
                 }
                 return match std::str::from_utf8(&output) {
-                    Ok(body) => verify_body(body, vm, warp),
+                    Ok(body) => verify_https_200(body, vm, warp),
                     Err(_) => Proof::new(Verdict::Unknown, "HTTPS_RESPONSE_INVALID"),
                 };
             }
@@ -280,9 +312,29 @@ mod tests {
     }
     #[test]
     fn distinct_failures_are_not_silent_fallback() {
-        assert_eq!(curl_failure(Some(60)).reason, "TLS_CERTIFICATE_REJECTED");
-        assert_eq!(curl_failure(Some(67)).reason, "PROXY_AUTH_REJECTED");
-        assert_eq!(curl_failure(Some(28)).verdict, Verdict::Unknown);
+        assert_eq!(
+            curl_failure(Some(60), "").reason,
+            "TLS_CERTIFICATE_REJECTED"
+        );
+        assert_eq!(curl_failure(Some(67), "").reason, "PROXY_AUTH_REJECTED");
+        assert_eq!(curl_failure(Some(28), "").verdict, Verdict::Unknown);
+        assert_eq!(curl_failure(Some(7), "").reason, "HTTPS_CONNECT_FAILED");
+        assert_eq!(
+            curl_failure(Some(28), "").reason,
+            "HTTPS_DEADLINE_OR_TIMEOUT"
+        );
+        assert_eq!(
+            curl_failure(Some(7), "WSAEADDRNOTAVAIL").reason,
+            "CURL_SOURCE_ADDRESS_UNAVAILABLE_OBSERVED"
+        );
+        assert_eq!(
+            verify_https_200("64.176.74.102\n200", vm(), false).verdict,
+            Verdict::Pass
+        );
+        assert_eq!(
+            verify_https_200("64.176.74.102\n503", vm(), false).reason,
+            "HTTPS_STATUS_NOT_SUCCESS"
+        );
     }
     #[test]
     fn auth_never_escapes_stdin_config() {

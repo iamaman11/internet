@@ -176,6 +176,7 @@ pub fn batch(ids: &[&str], deep: bool) -> Vec<Diagnostic> {
             verdict: egress::Verdict::Unknown,
             reason: "EGRESS_PROBE_PANIC",
             actual: "line2 probe thread unavailable".into(),
+            results: vec![],
         })
     });
     let line1_proof = line1.map(|job| {
@@ -244,6 +245,61 @@ fn proof_health(verdict: egress::Verdict) -> Health {
         egress::Verdict::Pass => Health::Healthy,
         egress::Verdict::Failed => Health::Failed,
         egress::Verdict::Unknown => Health::Unknown,
+    }
+}
+
+fn config_failure(reason: &'static str) -> (Health, &'static str, &'static str) {
+    match reason {
+        "CONFIG_NOT_CONFIGURED" => (
+            Health::Degraded,
+            reason,
+            "Configure INTERNET from the trusted native runtime source (elevated terminal)",
+        ),
+        "CONFIG_ACCESS_DENIED" => (
+            Health::Unknown,
+            reason,
+            "Rerun in an elevated terminal to read C:\\internet\\config; preserve existing ACLs",
+        ),
+        "CONFIG_JSON_INVALID" => (
+            Health::Failed,
+            reason,
+            "Inspect the native config with an elevated terminal; do not overwrite blindly",
+        ),
+        "CONFIG_READ_FAILED" => (
+            Health::Unknown,
+            reason,
+            "Inspect the native configuration read error with an elevated terminal",
+        ),
+        _ => (
+            Health::Unknown,
+            reason,
+            "Inspect the owned native configuration without changing routes",
+        ),
+    }
+}
+
+fn task_failure(reason: &'static str) -> (Health, &'static str, &'static str) {
+    match reason {
+        "TASK_NOT_INSTALLED" => (
+            Health::Degraded,
+            reason,
+            "Install the verified managed Windows task; do not start an unowned process",
+        ),
+        "TASK_ACCESS_DENIED" => (
+            Health::Unknown,
+            reason,
+            "Rerun status in an elevated terminal; preserve Task Scheduler permissions",
+        ),
+        "TASK_OWNER_CONFLICT" => (
+            Health::Failed,
+            reason,
+            "Inspect the exact task owner; do not modify a foreign task",
+        ),
+        _ => (
+            Health::Unknown,
+            reason,
+            "Inspect the owned Task Scheduler task in an elevated terminal",
+        ),
     }
 }
 
@@ -384,29 +440,76 @@ struct Line2Result {
     verdict: egress::Verdict,
     reason: &'static str,
     actual: String,
+    results: Vec<serde_json::Value>,
+}
+
+pub(crate) fn line2_auth(c: &serde_json::Value) -> Result<(&str, &str), &'static str> {
+    let inbound = &c["inbounds"][1];
+    if inbound["tag"] != "wsl-in"
+        || inbound["type"] != "mixed"
+        || inbound["listen_port"].as_u64() != Some(2081)
+    {
+        return Err("LINE2_AUTH_OWNER_INVALID");
+    }
+    let user = inbound["users"][0]["username"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or("LINE2_CREDENTIAL_NOT_CONFIGURED")?;
+    let password = inbound["users"][0]["password"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or("LINE2_CREDENTIAL_NOT_CONFIGURED")?;
+    egress::credential_line(user, password)?;
+    Ok((user, password))
+}
+
+fn line2_unknown(reason: &'static str) -> Line2Result {
+    Line2Result {
+        verdict: egress::Verdict::Unknown,
+        reason,
+        actual: "line2 endpoints not verified".into(),
+        results: crate::proxies::LINES
+            .iter()
+            .map(|(mode, protocol, port, _)| {
+                serde_json::json!({"mode":mode,"protocol":protocol,"port":port,
+                "status":"UNKNOWN","exit_ip":null,"duration_ms":0,"reason_code":reason})
+            })
+            .collect(),
+    }
+}
+
+/// Same native read-only probe as `internet diagnose vultr/line2`.
+/// No Ubuntu process, Vault invocation, credential copy or second probe owner.
+pub fn line2_proxy_tests() -> Result<serde_json::Value, &'static str> {
+    if !cfg!(windows) {
+        return Err("WINDOWS_ONLY");
+    }
+    let c = config::read(&config::installed())?;
+    let proof = line2_egress(c, Instant::now() + Duration::from_millis(9300));
+    let passed = proof
+        .results
+        .iter()
+        .filter(|v| v["status"] == "PASS")
+        .count();
+    Ok(serde_json::json!({
+        "ok":passed == crate::proxies::LINES.len(),
+        "scope":"native_windows_six_line2_authenticated_ipv4_https_egress",
+        "source":"installed_protected_sing_box_config_and_native_curl",
+        "reason_code":proof.reason,
+        "pass":passed,
+        "total":crate::proxies::LINES.len(),
+        "results":proof.results,
+    }))
 }
 
 fn line2_egress(config: serde_json::Value, deadline: Instant) -> Line2Result {
     use egress::Verdict;
-    let unknown = |reason: &'static str| Line2Result {
-        verdict: Verdict::Unknown,
-        reason,
-        actual: "line2 endpoints not verified".into(),
-    };
     let Some(vm) = native_vm(&config) else {
-        return unknown("REMOTE_ENDPOINT_UNKNOWN");
+        return line2_unknown("REMOTE_ENDPOINT_UNKNOWN");
     };
-    let Some(user) = config
-        .pointer("/inbounds/1/users/0/username")
-        .and_then(|v| v.as_str())
-    else {
-        return unknown("LINE2_CREDENTIAL_NOT_CONFIGURED");
-    };
-    let Some(pass) = config
-        .pointer("/inbounds/1/users/0/password")
-        .and_then(|v| v.as_str())
-    else {
-        return unknown("LINE2_CREDENTIAL_NOT_CONFIGURED");
+    let (user, pass) = match line2_auth(&config) {
+        Ok(auth) => auth,
+        Err(reason) => return line2_unknown(reason),
     };
     let domain_for = |tag: &str| {
         config["outbounds"]
@@ -416,7 +519,7 @@ fn line2_egress(config: serde_json::Value, deadline: Instant) -> Line2Result {
             .as_str()
     };
     let Some(domain) = domain_for("direct-hysteria2") else {
-        return unknown("LINE2_TLS_DOMAIN_UNKNOWN");
+        return line2_unknown("LINE2_TLS_DOMAIN_UNKNOWN");
     };
     if domain_for("warp-hysteria2") != Some(domain)
         || domain.is_empty()
@@ -426,22 +529,14 @@ fn line2_egress(config: serde_json::Value, deadline: Instant) -> Line2Result {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
     {
-        return unknown("LINE2_TLS_DOMAIN_INVALID");
+        return line2_unknown("LINE2_TLS_DOMAIN_INVALID");
     }
     // Six native Line2 inbounds; only confirmed HTTPS egress is claimed.
     // Remote TLS proxies are pinned to the VM IP but verified by the DNS/SAN name.
-    let routes = [
-        ("warp_http", "http", 3128u16, true),
-        ("warp_socks", "socks5h", 1080, true),
-        ("warp_https", "https", 9443, true),
-        ("direct_http", "http", 4128, false),
-        ("direct_socks", "socks5h", 4080, false),
-        ("direct_https", "https", 4443, false),
-    ];
-    let proofs: Vec<(&str, egress::Proof)> = std::thread::scope(|scope| {
-        let jobs: Vec<_> = routes
+    let proofs: Vec<(&str, &str, u16, egress::Proof, u128)> = std::thread::scope(|scope| {
+        let jobs: Vec<_> = crate::proxies::LINES
             .iter()
-            .map(|(label, scheme, port, warp)| {
+            .map(|(mode, protocol, port, scheme)| {
                 let proxy = if *scheme == "https" {
                     format!("https://{domain}:{port}")
                 } else {
@@ -452,14 +547,18 @@ fn line2_egress(config: serde_json::Value, deadline: Instant) -> Line2Result {
                 } else {
                     None
                 };
+                let started = Instant::now();
                 (
-                    *label,
+                    *mode,
+                    *protocol,
+                    *port,
+                    started,
                     scope.spawn(move || {
                         egress::https(
                             &proxy,
                             Some((user, pass)),
                             vm,
-                            *warp,
+                            *mode == "WARP",
                             deadline,
                             pinned.as_deref(),
                         )
@@ -468,40 +567,57 @@ fn line2_egress(config: serde_json::Value, deadline: Instant) -> Line2Result {
             })
             .collect();
         jobs.into_iter()
-            .map(|(label, job)| {
+            .map(|(mode, protocol, port, started, job)| {
                 (
-                    label,
+                    mode,
+                    protocol,
+                    port,
                     job.join().unwrap_or(egress::Proof {
                         verdict: Verdict::Unknown,
                         reason: "EGRESS_PROBE_PANIC",
                     }),
+                    started.elapsed().as_millis(),
                 )
             })
             .collect()
     });
     let actual = proofs
         .iter()
-        .map(|(name, p)| format!("{name}={:?}/{}", p.verdict, p.reason))
+        .map(|(mode, protocol, _, p, _)| format!("{mode}_{protocol}={:?}/{}", p.verdict, p.reason))
         .collect::<Vec<_>>()
         .join("; ");
-    if let Some((_, fail)) = proofs.iter().find(|(_, p)| p.verdict == Verdict::Failed) {
+    let results: Vec<_> = proofs.iter().map(|(mode, protocol, port, p, ms)| {
+        serde_json::json!({"mode":mode,"protocol":protocol,"port":port,
+            "status":match p.verdict {Verdict::Pass=>"PASS",Verdict::Failed=>"FAILED",Verdict::Unknown=>"UNKNOWN"},
+            "reason_code":p.reason,"duration_ms":ms,"exit_ip":null})
+    }).collect();
+    if let Some((_, _, _, fail, _)) = proofs
+        .iter()
+        .find(|(_, _, _, p, _)| p.verdict == Verdict::Failed)
+    {
         return Line2Result {
             verdict: Verdict::Failed,
             reason: fail.reason,
             actual,
+            results,
         };
     }
-    if proofs.iter().all(|(_, p)| p.verdict == Verdict::Pass) {
+    if proofs
+        .iter()
+        .all(|(_, _, _, p, _)| p.verdict == Verdict::Pass)
+    {
         Line2Result {
             verdict: Verdict::Pass,
             reason: "LINE2_SIX_HTTPS_EGRESS_PATHS_CONFIRMED",
             actual,
+            results,
         }
     } else {
         Line2Result {
             verdict: Verdict::Unknown,
             reason: "LINE2_EGRESS_INCOMPLETE",
             actual,
+            results,
         }
     }
 }
@@ -719,14 +835,31 @@ fn local_binary(task: Option<&Result<bool, &'static str>>) -> Diagnostic {
     }
     d.observed_at = now();
     d.scope = "local";
-    if !config::binary().is_file() {
-        d.health = Health::Failed;
-        d.reason_code = "BINARY_MISSING";
-        return d;
+    match std::fs::metadata(config::binary()) {
+        Ok(meta) if meta.is_file() => {}
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            d.health = Health::Unknown;
+            d.reason_code = "BINARY_ACCESS_DENIED";
+            d.next_action =
+                "Rerun binary readback with an elevated terminal; preserve installed ACLs";
+            return d;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            d.health = Health::Failed;
+            d.reason_code = "BINARY_MISSING";
+            return d;
+        }
+        _ => {
+            d.health = Health::Unknown;
+            d.reason_code = "BINARY_READBACK_FAILED";
+            return d;
+        }
     }
-    if config::read(&config::installed()).is_err() {
-        d.health = Health::Degraded;
-        d.reason_code = "NOT_CONFIGURED";
+    if let Err(reason) = config::read(&config::installed()) {
+        let (health, reason, action) = config_failure(reason);
+        d.health = health;
+        d.reason_code = reason;
+        d.next_action = action;
         return d;
     }
     match task_running(task) {
@@ -740,10 +873,11 @@ fn local_binary(task: Option<&Result<bool, &'static str>>) -> Diagnostic {
             d.reason_code = "TASK_STOPPED";
             d.next_action = "internet start";
         }
-        Err(_) => {
-            d.health = Health::Unknown;
-            d.reason_code = "TASK_READBACK_UNKNOWN";
-            d.next_action = "internet diagnose windows/sing-box";
+        Err(reason) => {
+            let (health, reason, action) = task_failure(reason);
+            d.health = health;
+            d.reason_code = reason;
+            d.next_action = action;
         }
     }
     d
@@ -800,10 +934,11 @@ fn local_selector(
                     d.reason_code = "SING_BOX_STOPPED";
                     d.next_action = "internet start";
                 }
-                Err(_) => {
-                    d.health = Health::Unknown;
-                    d.reason_code = "TASK_STATE_UNKNOWN";
-                    d.next_action = "internet diagnose";
+                Err(reason) => {
+                    let (health, reason, action) = task_failure(reason);
+                    d.health = health;
+                    d.reason_code = reason;
+                    d.next_action = action;
                 }
             }
             if target == Target::Wsl && d.health == Health::Healthy {
@@ -879,11 +1014,13 @@ fn local_selector(
             }
             // Even a TCP listener is not authenticated external egress proof.
         }
-        Err(_) => {
+        Err(reason) => {
             d.source = "local-filesystem";
             d.observed_at = now();
-            d.health = Health::Degraded;
-            d.reason_code = "NOT_CONFIGURED";
+            let (health, reason, action) = config_failure(reason);
+            d.health = health;
+            d.reason_code = reason;
+            d.next_action = action;
         }
     }
     d
@@ -964,6 +1101,41 @@ mod tests {
         let d = inspect("vultr/vm", true);
         assert_eq!(d.health, Health::Unknown);
         assert!(d.observed_at.is_none());
+    }
+    #[test]
+    fn config_and_task_permission_errors_are_never_reported_as_absence() {
+        let cases = [
+            ("CONFIG_NOT_CONFIGURED", Health::Degraded),
+            ("CONFIG_ACCESS_DENIED", Health::Unknown),
+            ("CONFIG_JSON_INVALID", Health::Failed),
+            ("CONFIG_READ_FAILED", Health::Unknown),
+        ];
+        for (reason, expected) in cases {
+            let (health, code, _) = config_failure(reason);
+            assert_eq!(health, expected);
+            assert_eq!(code, reason);
+        }
+        for reason in [
+            "TASK_ACCESS_DENIED",
+            "TASK_READBACK_FAILED",
+            "TASK_XML_READBACK_FAILED",
+        ] {
+            let (health, code, _) = task_failure(reason);
+            assert_eq!(health, Health::Unknown);
+            assert_eq!(code, reason);
+        }
+    }
+    #[test]
+    fn line2_preflight_is_six_independent_unknowns_and_never_exports_auth() {
+        let c = serde_json::json!({"inbounds":[{}, {"tag":"wsl-in","type":"mixed","listen_port":2081,
+            "users":[{"username":"fixture-only","password":"fixture-secret"}]}]});
+        assert_eq!(line2_auth(&c).unwrap().0, "fixture-only");
+        let result = line2_unknown("LINE2_TLS_DOMAIN_UNKNOWN");
+        assert_eq!(result.results.len(), 6);
+        assert!(result.results.iter().all(|x| x["status"] == "UNKNOWN"));
+        let rendered = serde_json::to_string(&result.results).unwrap();
+        assert!(!rendered.contains("fixture-secret"));
+        assert!(!rendered.contains("fixture-only"));
     }
     #[test]
     fn tree_is_closed_and_acyclic() {
