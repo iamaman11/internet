@@ -496,6 +496,12 @@ fn execute(args: &[String], json_mode: bool) -> i32 {
                         "Run the same command in an elevated terminal; do not change C:\\internet\\config permissions"
                     } else if code == "RECOVERY_CONTROL_INDEPENDENCE_UNPROVEN" {
                         "Recovery refused: WindowsAdminMCP physical control route not independently verified; inspect control without stopping sing-box"
+                    } else if code == "RECOVERY_OTHER_SELECTED_TCP_ACTIVE" {
+                        "Recovery refused: selected Windows applications have active TCP connections; preserve live ChatGPT/Codex/other sessions and retry only when safely idle"
+                    } else if code == "RECOVERY_APP_IDENTITY_AMBIGUOUS" || code == "RECOVERY_APP_INVENTORY_ACCESS_DENIED" {
+                        "Recovery refused: exact application/socket ownership is ambiguous or permission-limited; rerun elevated read-only inspection"
+                    } else if code == "RECOVERY_ALL_MODE_IS_NOT_QUIESCENT" {
+                        "Recovery refused in ALL mode: other traffic may be active; do not interrupt arbitrary apps or remote control"
                     } else if code == "RECOVERY_MANUAL_STOP_HONORED" {
                         "The owned task is not running; deliberate STOP is honored and recover will not activate it"
                     } else if code == "RECOVERY_TUN_NATIVE_DRIFT" || code == "RECOVERY_DESKTOP_SELECTOR_DRIFT" {

@@ -176,7 +176,9 @@ catch { exit 6 }
         }
         // Do not mutate while remote control is using the same TUN; a shared
         // destination IP does not prove control path independence.
-        tun::recovery_control_independent().map_err(|_| "RECOVERY_CONTROL_INDEPENDENCE_UNPROVEN")
+        tun::recovery_control_independent()
+            .map_err(|_| "RECOVERY_CONTROL_INDEPENDENCE_UNPROVEN")?;
+        tun::recovery_selected_apps_quiescent()
     }
 
     /// Explicitly called by one CLI/menu operation; never from status/diagnose,
