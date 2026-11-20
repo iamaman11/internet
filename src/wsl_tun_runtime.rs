@@ -311,6 +311,16 @@ mod native {
         }
         Ok(name)
     }
+    /// Identity-only preflight for the existing offline Windows WSL sync.
+    /// The private key never leaves this process or enters an argument/log.
+    pub(crate) fn offline_rebind_material(
+        network: &wsl::Network,
+    ) -> Result<(String, String, String), &'static str> {
+        let interface = windows_binding(network.gateway)?;
+        let guest_public = guest_public()?;
+        let windows_private = windows_private()?;
+        Ok((guest_public, windows_private, interface))
+    }
     fn check_egress() -> Result<String, &'static str> {
         // Use ordinary guest networking; explicitly remove proxy variables.
         let mut c = Command::new("wsl.exe");
@@ -608,6 +618,8 @@ mod native {
     }
 }
 
+#[cfg(windows)]
+pub(crate) use native::offline_rebind_material;
 #[cfg(windows)]
 pub use native::{diagnose, dns_setup, off, on, status};
 

@@ -207,6 +207,108 @@ if([string]$p.LocalPort -ne '2081' -or [string]$a.RemoteAddress -ne $remote -or
     }
     Ok(())
 }
+
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyFirewallBefore(pub Option<(Ipv4Addr, Ipv4Addr)>);
+
+/// Observe only INTERNET's exact optional TCP/2081 rule, including its
+/// narrowly scoped addresses. No arbitrary firewall rule may be treated as
+/// ours merely because its display name happens to match.
+#[cfg(windows)]
+pub fn firewall_snapshot() -> Result<ProxyFirewallBefore, &'static str> {
+    use std::process::Command;
+    let script = r#"
+$ErrorActionPreference='Stop'
+$name='INTERNET-WSL-INBOUND-2081'
+$r=Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue
+if(!$r){'ABSENT';exit 0}
+$p=$r | Get-NetFirewallPortFilter
+$a=$r | Get-NetFirewallAddressFilter
+$app=$r | Get-NetFirewallApplicationFilter
+$f=$r | Get-NetFirewallInterfaceFilter
+if($r.DisplayName -cne $name -or $r.Direction -ne 'Inbound' -or
+   $r.Action -ne 'Allow' -or $r.Enabled -ne 'True' -or
+   [string]$r.Profile -ne 'Any' -or [string]$p.Protocol -ne 'TCP' -or
+   [string]$p.LocalPort -ne '2081' -or [string]$p.RemotePort -ne 'Any' -or
+   [string]$app.Program -ne 'Any' -or [string]$f.InterfaceAlias -ne 'Any'){
+   throw 'WSL_PROXY_FIREWALL_OWNER_CONFLICT'
+}
+@{local=[string]$a.LocalAddress;remote=[string]$a.RemoteAddress} |
+    ConvertTo-Json -Compress
+"#;
+    let result = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .map_err(|_| "WSL_PROXY_FIREWALL_SNAPSHOT_FAILED")?;
+    if !result.status.success() {
+        return Err("WSL_PROXY_FIREWALL_OWNER_CONFLICT");
+    }
+    let raw = std::str::from_utf8(&result.stdout)
+        .map_err(|_| "WSL_PROXY_FIREWALL_SNAPSHOT_FAILED")?
+        .trim();
+    if raw == "ABSENT" {
+        return Ok(ProxyFirewallBefore(None));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(raw).map_err(|_| "WSL_PROXY_FIREWALL_SNAPSHOT_FAILED")?;
+    let local: Ipv4Addr = v["local"]
+        .as_str()
+        .ok_or("WSL_PROXY_FIREWALL_SNAPSHOT_FAILED")?
+        .parse()
+        .map_err(|_| "WSL_PROXY_FIREWALL_SNAPSHOT_FAILED")?;
+    let remote: Ipv4Addr = v["remote"]
+        .as_str()
+        .ok_or("WSL_PROXY_FIREWALL_SNAPSHOT_FAILED")?
+        .parse()
+        .map_err(|_| "WSL_PROXY_FIREWALL_SNAPSHOT_FAILED")?;
+    if !local.is_private() || !remote.is_private() {
+        return Err("WSL_PROXY_FIREWALL_OWNER_CONFLICT");
+    }
+    Ok(ProxyFirewallBefore(Some((local, remote))))
+}
+
+#[cfg(windows)]
+pub fn firewall_restore(
+    network: &Network,
+    before: &ProxyFirewallBefore,
+) -> Result<(), &'static str> {
+    use std::process::Command;
+    let current = firewall_snapshot()?;
+    if current == *before {
+        return Ok(());
+    }
+    if current.0 != Some((network.gateway, network.guest)) {
+        return Err("WSL_PROXY_FIREWALL_CONCURRENT_CHANGE");
+    }
+    let action = match before.0 {
+        None => "Remove-NetFirewallRule -Name $name -ErrorAction Stop".to_owned(),
+        Some((local, remote)) => format!(
+            "$r | Get-NetFirewallAddressFilter | Set-NetFirewallAddressFilter -LocalAddress '{local}' -RemoteAddress '{remote}' -ErrorAction Stop | Out-Null"
+        ),
+    };
+    let script = format!(
+        r#"
+$ErrorActionPreference='Stop'
+$name='INTERNET-WSL-INBOUND-2081'
+$r=Get-NetFirewallRule -Name $name -ErrorAction Stop
+$a=$r | Get-NetFirewallAddressFilter
+if([string]$a.LocalAddress -cne '{local}' -or
+   [string]$a.RemoteAddress -cne '{remote}'){{throw 'WSL_PROXY_FIREWALL_CONCURRENT_CHANGE'}}
+{action}
+"#,
+        local = network.gateway,
+        remote = network.guest,
+    );
+    let result = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .map_err(|_| "WSL_PROXY_FIREWALL_ROLLBACK_FAILED")?;
+    if !result.status.success() || firewall_snapshot()? != *before {
+        return Err("WSL_PROXY_FIREWALL_ROLLBACK_UNCONFIRMED");
+    }
+    Ok(())
+}
 #[cfg(not(windows))]
 pub fn firewall_allow(_: &Network) -> Result<(), &'static str> {
     Err("WINDOWS_ONLY")

@@ -543,6 +543,42 @@ mod tests {
         };
         let with_wg = wsl_tun::render(&base, &options).unwrap();
         assert!(validate(&with_wg).is_ok());
+        let new_guest: std::net::Ipv4Addr = "172.17.160.95".parse().unwrap();
+        let rebound = wsl_tun::rebind_guest(&with_wg, new_guest, key, key).unwrap();
+        assert_eq!(
+            rebound["endpoints"][0]["peers"][0]["address"],
+            "172.17.160.95"
+        );
+        let mut peer_only = with_wg.clone();
+        peer_only["endpoints"][0]["peers"][0]["address"] = serde_json::json!("172.17.160.95");
+        assert_eq!(rebound, peer_only, "only the owned peer address may change");
+        assert_eq!(
+            wsl_tun::rebind_guest(&rebound, new_guest, key, key).unwrap(),
+            rebound,
+            "offline sync must be idempotent"
+        );
+        assert_eq!(
+            wsl_tun::rebind_guest(
+                &with_wg,
+                new_guest,
+                "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+                key
+            ),
+            Err("WSL_WG_REBIND_IDENTITY_MISMATCH")
+        );
+        assert_eq!(
+            wsl_tun::rebind_guest(
+                &with_wg,
+                new_guest,
+                key,
+                "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+            ),
+            Err("WSL_WG_REBIND_IDENTITY_MISMATCH")
+        );
+        assert_eq!(
+            wsl_tun::rebind_guest(&base, new_guest, key, key),
+            Err("WSL_WG_ENDPOINT_NOT_CONFIGURED")
+        );
         assert_eq!(wsl_tun::remove(&with_wg).unwrap(), base);
         assert_eq!(
             wsl_tun::render(&with_wg, &options).unwrap_err(),
