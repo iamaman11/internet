@@ -227,6 +227,36 @@ pub fn render(original: &Value, opts: &Options<'_>) -> Result<Value, &'static st
     Ok(next)
 }
 
+/// Offline, exact-owner rebind after WSL NAT assigns a different guest IP.
+/// This modifies only the existing WG peer address. It never creates another
+/// endpoint, changes a key, selector, Windows TUN or route rule.
+pub fn rebind_guest(
+    original: &Value,
+    guest: Ipv4Addr,
+    guest_public: &str,
+    windows_private: &str,
+) -> Result<Value, &'static str> {
+    crate::config::validate(original)?;
+    if !valid_guest_ip(&guest.to_string()) || !key_like(guest_public) || !key_like(windows_private)
+    {
+        return Err("WSL_WG_REBIND_IDENTITY_INVALID");
+    }
+    let (_, owned) = split(original)?;
+    let Some(layer) = owned else {
+        return Err("WSL_WG_ENDPOINT_NOT_CONFIGURED");
+    };
+    if layer.endpoint["private_key"].as_str() != Some(windows_private)
+        || layer.endpoint["peers"][0]["public_key"].as_str() != Some(guest_public)
+        || layer.endpoint["listen_port"].as_u64() != Some(u64::from(WINDOWS_WG_LISTEN_PORT))
+    {
+        return Err("WSL_WG_REBIND_IDENTITY_MISMATCH");
+    }
+    let mut next = original.clone();
+    next["endpoints"][0]["peers"][0]["address"] = json!(guest.to_string());
+    crate::config::validate(&next)?;
+    Ok(next)
+}
+
 /// Called only while the native Windows task is stopped. The optional
 /// WireGuard listener must not depend on a WSL adapter that starts later.
 /// The existing firewall still restricts UDP ingress to the owned WSL NIC.

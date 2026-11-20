@@ -36,6 +36,7 @@ mod native {
     };
 
     const GUEST_CODE: &str = include_str!("wsl_tun_guest.py");
+    const BOOT_CODE: &str = include_str!("wsl_tun_boot.py");
     // These are native executor working credentials, provisioned once on the
     // local machine. Vault and GitHub never participate in runtime operations.
     const WIN_KEY_FILE: &str = r"C:\internet\config\wsl-wireguard.key";
@@ -167,6 +168,94 @@ mod native {
         }
         Ok(value)
     }
+    /// One-shot root handoff to the installed Ubuntu [boot] hook. The boot
+    /// hook reuses the same guest adapter; it never starts a Windows process,
+    /// changes Windows routing or creates another Task/service.
+    fn boot(action: &str, key: Option<&str>) -> Result<Value, &'static str> {
+        use std::io::Write;
+        let mut command = Command::new("wsl.exe");
+        command.args([
+            "-d",
+            "Ubuntu",
+            "-u",
+            "root",
+            "--",
+            "/usr/bin/python3",
+            "-c",
+            BOOT_CODE,
+            action,
+        ]);
+        if let Some(key) = key {
+            command.arg(key);
+        }
+        command
+            .stdin(if action == "install" {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().map_err(|_| "WSL_BOOT_EXEC_UNAVAILABLE")?;
+        if action == "install" {
+            let payload = json!({"boot": BOOT_CODE, "guest": GUEST_CODE}).to_string();
+            let write = child
+                .stdin
+                .as_mut()
+                .ok_or("WSL_BOOT_INSTALL_PIPE_FAILED")
+                .and_then(|stdin| {
+                    stdin
+                        .write_all(payload.as_bytes())
+                        .map_err(|_| "WSL_BOOT_INSTALL_PIPE_FAILED")
+                });
+            drop(child.stdin.take());
+            if let Err(code) = write {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(code);
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(40);
+        let result = loop {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    break child
+                        .wait_with_output()
+                        .map_err(|_| "WSL_BOOT_EXEC_READBACK_FAILED");
+                }
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(30))
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("WSL_BOOT_EXEC_UNRESPONSIVE");
+                }
+            }
+        }?;
+        let value: Value =
+            serde_json::from_slice(&result.stdout).map_err(|_| "WSL_BOOT_OUTPUT_INVALID")?;
+        if !result.status.success() || value["ok"] != true {
+            return Err(match value["reason_code"].as_str() {
+                Some("WSL_BOOT_OWNER_CONFLICT") => "WSL_BOOT_OWNER_CONFLICT",
+                Some("WSL_BOOT_CONF_MISSING") => "WSL_BOOT_CONF_MISSING",
+                Some("WSL_BOOT_HOOK_NOT_READY") => "WSL_BOOT_HOOK_NOT_READY",
+                Some("WSL_BOOT_DESIRED_INVALID") => "WSL_BOOT_DESIRED_INVALID",
+                Some("WSL_BOOT_INSTALL_READBACK_FAILED") => "WSL_BOOT_INSTALL_READBACK_FAILED",
+                Some("WSL_BOOT_ROOT_REQUIRED") => "WSL_BOOT_ROOT_REQUIRED",
+                _ => "WSL_BOOT_ACTION_REJECTED",
+            });
+        }
+        Ok(value)
+    }
+    fn boot_is_busy() -> Result<bool, &'static str> {
+        Ok(boot("status", None)?["restore_in_progress"] == true)
+    }
+    fn enable_boot(public: &str) -> Result<(), &'static str> {
+        boot("install", None)?;
+        boot("set-on", Some(public))?;
+        Ok(())
+    }
     // Read actual Windows UDP ownership: RUNNING Task Scheduler and valid
     // config do not prove that the optional WG listener is active.
     fn windows_wg_listener_ready() -> Result<bool, &'static str> {
@@ -221,6 +310,16 @@ mod native {
             return Err("WSL_NATIVE_ADAPTER_INVALID");
         }
         Ok(name)
+    }
+    /// Identity-only preflight for the existing offline Windows WSL sync.
+    /// The private key never leaves this process or enters an argument/log.
+    pub(crate) fn offline_rebind_material(
+        network: &wsl::Network,
+    ) -> Result<(String, String, String), &'static str> {
+        let interface = windows_binding(network.gateway)?;
+        let guest_public = guest_public()?;
+        let windows_private = windows_private()?;
+        Ok((guest_public, windows_private, interface))
     }
     fn check_egress() -> Result<String, &'static str> {
         // Use ordinary guest networking; explicitly remove proxy variables.
@@ -325,10 +424,20 @@ mod native {
         } else {
             "UNKNOWN"
         };
+        let boot_status = boot("status", None).unwrap_or_else(|_| {
+            json!({
+            "desired": "UNKNOWN", "boot_hook": "UNKNOWN",
+            "restore_in_progress": false,
+            "reason_code": "WSL_BOOT_STATUS_UNAVAILABLE"})
+        });
         Ok(json!({"ok":true,"owner":"INTERNET Rust / kernel WireGuard",
         "network":"WSL2 NAT","state":state,"windows_endpoint_configured":configured,
         "handshake_observed":handshake,"guest_peer_matches_native":peer_current,
         "guest":guest,"route":config::selected(&current,Target::Wsl)?.tag(),
+        "desired_state":boot_status["desired"],
+        "boot_hook":boot_status["boot_hook"],
+        "boot_restore_in_progress":boot_status["restore_in_progress"],
+        "last_boot_restore":boot_status["last_boot_restore"],
         "next_action":match state {
             "ON"=>"internet wsl tun diagnose",
             "OFF"=>"internet wsl tun on",
@@ -356,13 +465,30 @@ mod native {
     /// task, TUN, firewall and MCP are never modified by this operation.
     /// Initial endpoint provisioning is a separate explicit Windows action.
     pub fn on() -> Result<Value, &'static str> {
+        if boot_is_busy()? {
+            return Err("WSL_BOOT_RESTORE_IN_PROGRESS");
+        }
         let current = config::read(&config::installed())?;
         let configured = wsl_tun::split(&current)?.1.is_some();
         let before = guest_state()?;
         if configured && active(&before) && before["handshake_observed"] == true {
             let test = diagnose()?;
             if test["ok"] == true {
-                return Ok(json!({"ok":true,"changed":false,"observed":test}));
+                let guest_pub = guest_public()?;
+                let windows_private = windows_private()?;
+                let windows_pub = windows_public(&windows_private)?;
+                if super::endpoint_needs_update(
+                    configured,
+                    &current["endpoints"][0],
+                    before["guest_ipv4"].as_str().unwrap_or(""),
+                    &guest_pub,
+                    &windows_private,
+                ) {
+                    return Err("WSL_TUN_ENDPOINT_RECONFIGURATION_REQUIRED");
+                }
+                enable_boot(&windows_pub)?;
+                return Ok(json!({"ok":true,"changed":false,"observed":test,
+                    "desired_state":"ON","boot_hook":"INSTALLED"}));
             }
             return Err("WSL_TUN_EXISTING_STATE_UNVERIFIED");
         }
@@ -401,6 +527,9 @@ mod native {
         // No automatic Windows firewall edits in WSL ON. An absent or stale
         // owned rule is a setup fault, not permission to mutate Windows.
         wsl::wireguard_firewall_verify(&network, &interface)?;
+        // Hook installed before routing changes, but desired remains OFF
+        // until real handshake, HTTPS and native guest readback all succeed.
+        boot("install", None)?;
         let result = (|| -> Result<Value, &'static str> {
             // Prepare keeps Ubuntu's NAT default until a real handshake.
             guest("prepare", Some(&windows_pub))?;
@@ -430,9 +559,11 @@ mod native {
             if !active(&after) {
                 return Err("WSL_TUN_GUEST_READBACK_FAILED");
             }
+            boot("set-on", Some(&windows_pub))?;
             Ok(json!({"ok":true,"changed":true,"state":"ON",
                 "handshake":"PASS","public_ip4":ip,"route":chosen.tag(),
                 "dns_ipv6_route_readback":"PASS",
+                "desired_state":"ON","boot_hook":"INSTALLED",
                 "windows_process_unchanged":true,
                 "udp_dns_independent_apps":"NOT_TESTED"}))
         })();
@@ -450,6 +581,12 @@ mod native {
     /// OFF changes only Ubuntu; the idle owned Windows endpoint is retained.
     /// This avoids interrupting Windows TUN/MCP on ordinary WSL ON/OFF.
     pub fn off() -> Result<Value, &'static str> {
+        // Persist the explicit OFF before touching kernel state. A concurrent
+        // boot one-shot sees OFF and must abort/roll back.
+        boot("set-off", None)?;
+        if boot_is_busy()? {
+            return Err("WSL_BOOT_RESTORE_IN_PROGRESS");
+        }
         let current = config::read(&config::installed())?;
         let configured = wsl_tun::split(&current)?.1.is_some();
         let before = guest_state()?;
@@ -459,7 +596,7 @@ mod native {
             && before["ipv6_guard"] == false;
         if clean {
             return Ok(json!({"ok":true,"state":"OFF","changed":false,
-                "windows_endpoint_configured":configured}));
+                "windows_endpoint_configured":configured,"desired_state":"OFF"}));
         }
         if !configured {
             return Err("WSL_TUN_CONFIG_GUEST_DRIFT");
@@ -476,10 +613,13 @@ mod native {
         }
         Ok(json!({"ok":true,"state":"OFF","changed":true,
             "nat_restored":true,"windows_endpoint_configured":true,
+            "desired_state":"OFF",
             "windows_process_unchanged":true}))
     }
 }
 
+#[cfg(windows)]
+pub(crate) use native::offline_rebind_material;
 #[cfg(windows)]
 pub use native::{diagnose, dns_setup, off, on, status};
 

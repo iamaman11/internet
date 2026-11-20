@@ -386,7 +386,34 @@ catch { exit 6 }
             .map(|n| n > 0)
             .map_err(|_| "PROCESS_INVENTORY_FAILED")
     }
-    // Native sing-box validates the candidate before the single config is written.
+    // Native sing-box validates the candidate before any firewall/config
+    // mutation. An existing candidate file is never overwritten.
+    fn validate_candidate(path: &Path, updated: &serde_json::Value) -> Result<(), &'static str> {
+        let check_path = path
+            .parent()
+            .ok_or("CONFIG_PATH_INVALID")?
+            .join("sing-box.wsl-check.json");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&check_path)
+            .map_err(|_| "CONFIG_CHECK_CONFLICT")?;
+        let write = serde_json::to_vec(updated)
+            .map_err(|_| "CONFIG_SERIALIZE_FAILED")
+            .and_then(|bytes| {
+                file.write_all(&bytes)
+                    .and_then(|_| file.sync_all())
+                    .map_err(|_| "CONFIG_CHECK_WRITE_FAILED")
+            });
+        drop(file);
+        if let Err(reason) = write {
+            let _ = fs::remove_file(&check_path);
+            return Err(reason);
+        }
+        let test = native_check(&check_path);
+        let _ = fs::remove_file(&check_path);
+        test
+    }
     fn checked_replace(
         path: &Path,
         current: &serde_json::Value,
@@ -395,21 +422,7 @@ catch { exit 6 }
         if current == updated {
             return Ok(());
         }
-        let check_path = path
-            .parent()
-            .ok_or("CONFIG_PATH_INVALID")?
-            .join("sing-box.wsl-check.json");
-        if check_path.exists() {
-            return Err("CONFIG_CHECK_CONFLICT");
-        }
-        fs::write(
-            &check_path,
-            serde_json::to_vec(updated).map_err(|_| "CONFIG_SERIALIZE_FAILED")?,
-        )
-        .map_err(|_| "CONFIG_CHECK_WRITE_FAILED")?;
-        let test = native_check(&check_path);
-        let _ = fs::remove_file(&check_path);
-        test?;
+        validate_candidate(path, updated)?;
         config::write_checked(path, updated)
     }
     fn ensure_task() -> Result<(), &'static str> {
@@ -488,9 +501,75 @@ catch { exit 6 }
         let network = crate::wsl::discover_for_start()?.ok_or("WSL_GUEST_UNAVAILABLE")?;
         let path = config::installed();
         let current = config::read(&path)?;
-        let updated = config::with_wsl_gateway(&current, network.gateway)?;
-        crate::wsl::firewall_allow(&network)?;
-        checked_replace(&path, &current, &updated)
+        let changed_gateway = config::with_wsl_gateway(&current, network.gateway)?;
+        // WSL's authenticated TCP proxy predates the optional WireGuard TUN.
+        // A machine without the U7 layer must retain the original sync path.
+        let has_wg = crate::wsl_tun::split(&current)?.1.is_some();
+        let interface = if has_wg {
+            let (guest_public, windows_private, interface) =
+                crate::wsl_tun_runtime::offline_rebind_material(&network)?;
+            Some((guest_public, windows_private, interface))
+        } else {
+            None
+        };
+        let updated = if let Some((guest_public, windows_private, _)) = &interface {
+            crate::wsl_tun::rebind_guest(
+                &changed_gateway,
+                network.guest,
+                guest_public,
+                windows_private,
+            )?
+        } else {
+            changed_gateway
+        };
+        // All ownership/key/native-config checks happen BEFORE mutation.
+        // A stale old interface GUID is accepted only if it is no longer
+        // attached to any live adapter; foreign firewall rules are refused.
+        validate_candidate(&path, &updated)?;
+        let tcp_before = crate::wsl::firewall_snapshot()?;
+        let wg_before = interface
+            .as_ref()
+            .map(|(_, _, name)| crate::wsl::wireguard_firewall_snapshot(&network, name))
+            .transpose()?;
+        if is_running()? {
+            return Err("WSL_SYNC_TASK_STARTED_CONCURRENTLY");
+        }
+        let apply = (|| -> Result<(), &'static str> {
+            crate::wsl::firewall_allow(&network)?;
+            if let Some((_, _, name)) = &interface {
+                crate::wsl::wireguard_firewall_allow(&network, name)?;
+            }
+            if is_running()? {
+                return Err("WSL_SYNC_TASK_STARTED_CONCURRENTLY");
+            }
+            checked_replace(&path, &current, &updated)?;
+            if config::read(&path)? != updated {
+                return Err("WSL_SYNC_CONFIG_READBACK_MISMATCH");
+            }
+            Ok(())
+        })();
+        if let Err(original) = apply {
+            let config_restored = match config::read(&path) {
+                Ok(ref actual) if *actual == current => true,
+                Ok(ref actual) if *actual == updated => {
+                    checked_replace(&path, &updated, &current).is_ok()
+                }
+                _ => false,
+            };
+            let wg_restored = match (&interface, &wg_before) {
+                (Some((_, _, name)), Some(before)) => {
+                    crate::wsl::wireguard_firewall_restore(&network, name, before).is_ok()
+                }
+                (None, None) => true,
+                _ => false,
+            };
+            let tcp_restored = crate::wsl::firewall_restore(&network, &tcp_before).is_ok();
+            if !config_restored || !wg_restored || !tcp_restored {
+                return Err("WSL_SYNC_ROLLBACK_UNCONFIRMED");
+            }
+            return Err(original);
+        }
+        Ok(())
     }
     pub fn stop() -> Result<(), &'static str> {
         let running = is_running()?;
